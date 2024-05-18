@@ -1,0 +1,5 @@
+type: python
+function_name: result_coalescer
+max_queue_size: null
+max_batch_size: 500
+instance_count: 1

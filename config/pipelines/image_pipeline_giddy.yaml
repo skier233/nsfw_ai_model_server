@@ -1,0 +1,20 @@
+inputs:
+  - image_path
+output: result
+
+models:
+  - name: image_preprocessor
+    inputs:
+      - image_path
+    outputs:
+      - preprocessed_image
+  - name: giddy_music
+    inputs:
+      - preprocessed_image
+    outputs:
+      - actions
+  - name: result_coalescer
+    inputs:
+      - actions
+    outputs:
+      - result

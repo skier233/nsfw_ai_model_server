@@ -1,0 +1,37 @@
+inputs:
+  - video_path
+output: results
+
+models:
+  - name: video_preprocessor
+    inputs:
+      - video_path
+    outputs:
+      - children
+      - preprocessed_image
+      - frame_index
+  - name: giddy_music
+    inputs:
+      - preprocessed_image
+    outputs:
+      - actions
+  - name: result_coalescer
+    inputs:
+      - frame_index
+      - actions
+    outputs:
+      - result
+  - name: result_finisher
+    inputs:
+      - result
+    outputs: []
+  - name: batch_awaiter
+    inputs:
+      - children
+    outputs:
+      - childrenResults
+  - name: video_result_postprocessor
+    inputs:
+      - childrenResults
+    outputs:
+      - results

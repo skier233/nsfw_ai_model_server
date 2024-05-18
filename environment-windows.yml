@@ -1,0 +1,19 @@
+name: ai_model_server
+channels:
+  - defaults
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.11
+  - pytorch=2.3.0
+  - torchvision=0.18.0
+  - pytorch-cuda=12.1
+  - pyyaml
+  - pip
+  - pip:
+    - ./dist/ai_processing-0.0.0-cp311-cp311-win_amd64.whl  # [win]
+    - decord
+    - fastapi==0.111.0
+    - pycryptodomex==3.20.0
+    - uvicorn==0.29.0
+    - requests
