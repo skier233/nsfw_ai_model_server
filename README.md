@@ -14,7 +14,7 @@ Before becoming a patron, please be aware of the following limitations:
 
 - Currently, only GPU is supported and running on CPU is not supported. CPU support is one of my priorities to include in the future but is not ready yet.
 
-- The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues but I cannot guarantee that the models will be able to run on your computer.
+- The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues, but I cannot guarantee that the models will be able to run on your computer.
 
 ## Installation Instructions
 
