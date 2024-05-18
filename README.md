@@ -14,7 +14,9 @@ Before becoming a patron, please be aware of the following limitations:
 
 - Currently, only GPU is supported and running on CPU is not supported. CPU support is one of my priorities to include in the future but is not ready yet.
 
-- The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues but I cannot guarantee that the models will be able to run on your computer.
+- The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues, but I cannot guarantee that the models will be able to run on your computer.
+
+- There are currently no tools built to make use of the predictions that this server outputs so non-developers may not gain the most value from this project yet until some of those tools are created to consume this data in meaningful ways.
 
 ## Installation Instructions
 
@@ -24,27 +26,29 @@ Before becoming a patron, please be aware of the following limitations:
 
 3. Unzip the contents of the release and place them where you want to run the server from.
 
-4. Run the following command to create a new Conda environment:
+4. Download any models you want to use from patreon and paste the contents of that zip file into the directory you just created.
+
+5. Run the following command to create a new Conda environment:
     ```bash
     conda env create -f environment-{osname}.yml
     ```
     Replace `{osname}` with `windows` or `linux` based on your operating system.
 
-5. Activate the Conda environment:
+6. Activate the Conda environment:
     ```bash
     conda activate ai_model_server
     ```
 
-6. Start the server:
+7. Start the server:
     ```bash
     python server.py
     ```
-7. On the first time running the server, it will give you a link to a form to fill out and a code. Fill out that form with the provided code, license name, and your Patreon username.
+8. On the first time running the server, it will give you a link to a form to fill out and a code. Fill out that form with the provided code, license name, and your Patreon username.
 
-8. You will receive a license file within 24 hours which you should put inside the `models` folder.
+9. You will receive a license file within 24 hours which you should put inside the `models` folder.
 
-9. Run the server again:
+10. Run the server again:
     ```bash
     python server.py
     ```
-10. To test the server, you can run the example client from the `example_client` folder.
+11. To test the server, you can run the example client from the `example_client` folder.
