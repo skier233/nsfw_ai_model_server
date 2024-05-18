@@ -156,3 +156,5 @@ cython_debug/
 *.pt.enc
 *.tags.txt
 *.csv
+TODO.txt
+*.zip
