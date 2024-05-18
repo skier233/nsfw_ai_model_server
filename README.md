@@ -16,6 +16,8 @@ Before becoming a patron, please be aware of the following limitations:
 
 - The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues, but I cannot guarantee that the models will be able to run on your computer.
 
+- There are currently no tools built to make use of the predictions that this server outputs so non-developers may not gain the most value from this project yet until some of those tools are created to consume this data in meaningful ways.
+
 ## Installation Instructions
 
 1. Install Conda: You can download and install Conda from [here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html). Follow the instructions based on your operating system.
