@@ -87,6 +87,8 @@ class ModelProcessor():
     async def start_workers(self):
         if self.workers_started:
             return
+        else:
+            self.workers_started = True
         await self.model.load()
         for _ in range(self.instance_count):
             asyncio.create_task(self.worker_process())
