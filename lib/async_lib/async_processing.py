@@ -54,6 +54,7 @@ class ModelProcessor():
         self.max_batch_size = self.model.max_batch_size
         self.max_batch_waits = self.model.max_batch_waits
         self.workers_started = False
+        self.failed_loading = False
 
     async def add_to_queue(self, data):
         await self.queue.put(data)
@@ -86,10 +87,16 @@ class ModelProcessor():
 
     async def start_workers(self):
         if self.workers_started:
+            if self.failed_loading:
+                raise Exception("Error: Model failed to load!")
             return
         else:
-            self.workers_started = True
-        await self.model.load()
-        for _ in range(self.instance_count):
-            asyncio.create_task(self.worker_process())
-            self.workers_started = True
+            try:
+                self.workers_started = True
+                await self.model.load()
+                for _ in range(self.instance_count):
+                    asyncio.create_task(self.worker_process())
+                    self.workers_started = True
+            except Exception as e:
+                self.failed_loading = True
+                raise e

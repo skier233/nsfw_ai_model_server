@@ -1,5 +1,5 @@
 import time
-from ai_processing import preprocess_video_cpu
+from ai_processing import preprocess_video
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
 
@@ -7,17 +7,12 @@ from lib.model.model import Model
 class VideoPreprocessorModel(Model):
     def __init__(self, configValues):
         super().__init__(configValues)
-        self.use_gpu = configValues.get("use_gpu", False)
         self.image_size = configValues.get("image_size", 512)
         self.frame_interval = configValues.get("frame_interval", 0.5)
+        self.use_half_precision = configValues.get("use_half_precision", True)
+        self.device = configValues.get("device", None)
     
     async def worker_function(self, data):
-        if self.use_gpu:
-            pass #TODO AT SOME POINT IN THE FUTURE MAYBE
-        else:
-            await self.preprocess_cpu(data)
-
-    async def preprocess_cpu(self, data):
         for item in data:
             try:
                 totalTime = 0
@@ -26,7 +21,7 @@ class VideoPreprocessorModel(Model):
                 children = []
                 i = -1
                 oldTime = time.time()
-                for frame_index, frame in preprocess_video_cpu(input_data, self.frame_interval, self.image_size):
+                for frame_index, frame in preprocess_video(input_data, self.frame_interval, self.image_size, self.use_half_precision, self.device):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime
@@ -45,6 +40,3 @@ class VideoPreprocessorModel(Model):
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
                 itemFuture.set_exception(e)
-
-    async def preprocess_gpu(self, data):
-        pass #TODO AT SOME POINT IN THE FUTURE MAYBE

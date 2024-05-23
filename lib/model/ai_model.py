@@ -18,21 +18,28 @@ class AIModel(Model):
         if self.model_license_name is None:
             raise ValueError("model_license_name is required for models of type model")
         self.model = None
+        if self.device is None:
+            self.localdevice = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.localdevice = torch.device(self.device)
     
 
     async def worker_function(self, data):
-        images = []
-        for item in data:
+        # Get the shape of the first image in the data
+        first_image_shape = data[0].item_future[data[0].input_names[0]].shape
+
+        # Create an empty tensor with the same shape as the input images
+        images = torch.empty((len(data), *first_image_shape), device=self.localdevice)
+        for i, item in enumerate(data):
             itemFuture = item.item_future
-            images.append(itemFuture[item.input_names[0]])
-        images = torch.stack(images)
-        curr = time.time()
+            images[i] = itemFuture[item.input_names[0]]
+            
         results = self.model.process_images(images)
-        print(f"Processed {len(images)} images in {time.time() - curr}")
+        #print(f"Processed {len(images)} images in {time.time() - curr}")
         if self.model_threshold is not None:
-            results = [result > self.model_threshold for result in results]
+            results = (results > self.model_threshold)
             if self.model_return_tags:
-                results = [[self.tags[i] for i, tag in enumerate(result) if tag] for result in results]
+                results = [[self.tags[i] for i, tag in enumerate(result) if tag.item()] for result in results]
 
         for item, result in zip(data, results):
             itemFuture = item.item_future

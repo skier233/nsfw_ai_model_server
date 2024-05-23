@@ -3,8 +3,8 @@ model_file_name: giddy_music
 model_license_name: licenseV1.0
 model_threshold: 0.5
 model_return_tags: True
-max_queue_size: null
-max_batch_size: 12
-max_model_batch_size: 12
+max_queue_size: 16
+max_batch_size: 16
+max_model_batch_size: 16
 instance_count: 1
 max_batch_waits: 3

@@ -2,4 +2,4 @@ type: image_preprocessor
 max_queue_size: null
 max_batch_size: 1
 instance_count: 1
-use_gpu: false
+use_half_precision: true
