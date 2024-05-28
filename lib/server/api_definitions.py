@@ -6,3 +6,4 @@ class ImagePathList(BaseModel):
 
 class VideoPathList(BaseModel):
     path: str
+    returnTimestamps: bool = True

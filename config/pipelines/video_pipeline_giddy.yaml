@@ -1,11 +1,13 @@
 inputs:
   - video_path
+  - return_timestamps
 output: results
 
 models:
   - name: video_preprocessor
     inputs:
       - video_path
+      - return_timestamps
     outputs:
       - children
       - preprocessed_image

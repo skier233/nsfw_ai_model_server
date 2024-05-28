@@ -18,10 +18,11 @@ class VideoPreprocessorModel(Model):
                 totalTime = 0
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
+                use_timestamps = itemFuture[item.input_names[1]]
                 children = []
                 i = -1
                 oldTime = time.time()
-                for frame_index, frame in preprocess_video(input_data, self.frame_interval, self.image_size, self.use_half_precision, self.device):
+                for frame_index, frame in preprocess_video(input_data, self.frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime

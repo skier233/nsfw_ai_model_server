@@ -16,7 +16,7 @@ async def process_images(request: ImagePathList):
 
 @app.post("/process_video/")
 async def process_video(request: VideoPathList):
-    data = [request.path]
+    data = [request.path, request.returnTimestamps]
     future = await server_manager.get_request_future(data, "video_pipeline_giddy")
     result = await future
     return result
