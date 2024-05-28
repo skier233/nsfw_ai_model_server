@@ -52,3 +52,7 @@ Before becoming a patron, please be aware of the following limitations:
     python server.py
     ```
 11. To test the server, you can run the example client from the `example_client` folder.
+
+## Updating Instructions
+
+To update from a previous version, copy the contents of the zip file onto your existing directory, and then run update.ps1 or update.sh to upgrade your environment. 
