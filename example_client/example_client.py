@@ -1,6 +1,18 @@
 import asyncio
 import csv
+from typing import Any
 import aiohttp
+from pydantic import BaseModel
+
+class VideoResult(BaseModel):
+    result: Any
+    pipeline_short_name: str
+    pipeline_version: float
+
+class ImageResult(BaseModel):
+    result: Any
+    pipeline_short_name: str
+    pipeline_version: float
 
 API_BASE_URL = 'http://localhost:8000'
 
@@ -24,9 +36,8 @@ def save_video_results_to_csv(video_results):
     # # Write results to CSV
     with open('results.csv', 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        for result in video_results:
-            #Assuming 30fps video
-            row = [result['frame_index'] / 30] + result['actions']
+        for result in video_results.result:
+            row = [result['frame_index']] + result['actions']
             writer.writerow(row)
 
 
@@ -34,8 +45,8 @@ def main():
     image_paths = ['image_path1', 'image_path2', 'invalidpath']
     video_path = 'video_path1'
 
-    image_results = asyncio.run(process_images_async(image_paths))
-    video_results = asyncio.run(process_videos_async(video_path))
+    image_results = ImageResult(**asyncio.run(process_images_async(image_paths)))
+    video_results = VideoResult(**asyncio.run(process_videos_async(video_path)))
     save_video_results_to_csv(video_results)
 
     print("Image Processing Results:", image_results)

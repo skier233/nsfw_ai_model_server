@@ -1,3 +1,4 @@
+import logging
 import time
 from ai_processing import preprocess_video
 from lib.async_lib.async_processing import ItemFuture
@@ -11,6 +12,7 @@ class VideoPreprocessorModel(Model):
         self.frame_interval = configValues.get("frame_interval", 0.5)
         self.use_half_precision = configValues.get("use_half_precision", True)
         self.device = configValues.get("device", None)
+        self.logger = logging.getLogger("logger")
     
     async def worker_function(self, data):
         for item in data:
@@ -30,14 +32,14 @@ class VideoPreprocessorModel(Model):
                     data = {item.output_names[1]: frame, item.output_names[2]: frame_index}
                     result = await ItemFuture.create(item, data, item.item_future.handler)
                     children.append(result)
-                print("Preprocessed ", i, " frames in ", totalTime, " seconds at an average of ", totalTime/i, " seconds per frame.")
+                self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {totalTime/i} seconds per frame.")
                 await itemFuture.set_data(item.output_names[0], children)
             except FileNotFoundError as fnf_error:
-                print(f"File not found error: {fnf_error}")
+                self.logger.error(f"File not found error: {fnf_error}")
                 itemFuture.set_exception(fnf_error)
             except IOError as io_error:
-                print(f"IO error (video might be corrupted): {io_error}")
+                self.logger.error(f"IO error (video might be corrupted): {io_error}")
                 itemFuture.set_exception(io_error)
             except Exception as e:
-                print(f"An unexpected error occurred: {e}")
+                self.logger.error(f"An unexpected error occurred: {e}")
                 itemFuture.set_exception(e)

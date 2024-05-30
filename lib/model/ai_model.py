@@ -1,4 +1,5 @@
 
+import logging
 import torch
 from ai_processing import ModelRunner
 from lib.model.model import Model
@@ -33,9 +34,10 @@ class AIModel(Model):
         for i, item in enumerate(data):
             itemFuture = item.item_future
             images[i] = itemFuture[item.input_names[0]]
-            
+        curr = time.time()
         results = self.model.process_images(images)
-        #print(f"Processed {len(images)} images in {time.time() - curr}")
+        logger = logging.getLogger("logger")
+        logger.debug(f"Processed {len(images)} images in {time.time() - curr}")
         if self.model_threshold is not None:
             results = (results > self.model_threshold)
             if self.model_return_tags:

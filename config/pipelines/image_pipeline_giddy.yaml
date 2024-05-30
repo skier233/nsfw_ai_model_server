@@ -1,6 +1,8 @@
 inputs:
   - image_path
 output: result
+short_name: im_giddy
+version: 1.0
 
 models:
   - name: image_preprocessor

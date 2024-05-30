@@ -1,1 +1,4 @@
 active_pipelines: ["video_pipeline_giddy", "image_pipeline_giddy"]
+default_image_pipeline: "image_pipeline_giddy"
+default_video_pipeline: "video_pipeline_giddy"
+loglevel: "INFO"

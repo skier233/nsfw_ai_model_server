@@ -2,6 +2,8 @@ inputs:
   - video_path
   - return_timestamps
 output: results
+short_name: vid_giddy
+version: 1.0
 
 models:
   - name: video_preprocessor

@@ -18,3 +18,4 @@ dependencies:
     - uvicorn==0.29.0
     - requests
     - aiohttp
+    - colorlog

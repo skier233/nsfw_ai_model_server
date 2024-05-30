@@ -1,26 +1,41 @@
 from contextlib import asynccontextmanager
+import logging
 import os
 import signal
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from lib.config.config_utils import load_config
+from lib.logging.logger import setup_logger
 from lib.pipeline.pipeline_manager import PipelineManager
 from lib.server.exceptions import ServerStopException
 from fastapi.middleware.cors import CORSMiddleware
 
 class ServerManager:
     def __init__(self):
-        self.pipeline_manager = PipelineManager()
-
-    async def startup(self):
         config_path = "./config/config.yaml"
         if os.path.exists(config_path):
             config = load_config(config_path, default_config={})
         else:
             ServerStopException(f"Main config file does not exist: {config_path}")
-        pipelines = config["active_pipelines"]
+        loglevel = config.get("loglevel", "INFO")
+        setup_logger("logger", loglevel)
+        self.logger = logging.getLogger("logger")
+        self.config = config
+        self.pipeline_manager = PipelineManager()
+        self.default_image_pipeline = config.get("default_image_pipeline", None)
+        if self.default_image_pipeline is None:
+            self.logger.error("No default image pipeline found in the configuration file.")
+            raise ServerStopException("No default image pipeline found in the configuration file.")
+        
+        self.default_video_pipeline = config.get("default_video_pipeline", None)
+        if self.default_video_pipeline is None:
+            self.logger.error("No default video pipeline found in the configuration file.")
+            raise ServerStopException("No default video pipeline found in the configuration file.")
+
+    async def startup(self):
+        pipelines = self.config["active_pipelines"]
         if not pipelines:
-            print("No pipelines found in the configuration file.")
+            self.logger.error("No pipelines found in the configuration file.")
             raise ServerStopException("No pipelines found in the configuration file.")
         await self.pipeline_manager.load_pipelines(pipelines)
 

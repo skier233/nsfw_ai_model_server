@@ -14,6 +14,13 @@ class Pipeline:
             raise ValueError("Error: Pipeline output must be a non-empty string!")
         if not isinstance(configValues["models"], list):
             raise ValueError("Error: Pipeline models must be a non-empty list of strings!")
+        
+        self.short_name = configValues.get("short_name", None)
+        if self.short_name is None:
+            raise ValueError("Error: Pipeline short_name must be a non-empty string!")
+        self.version = configValues.get("version", None)
+        if self.version is None:
+            raise ValueError("Error: Pipeline version must be a non-empty float!")
         self.inputs = configValues["inputs"]
         self.output = configValues["output"]
 

@@ -1,4 +1,5 @@
 
+import logging
 from lib.async_lib.async_processing import ModelProcessor
 from lib.config.config_utils import load_config
 from lib.model.ai_model import AIModel
@@ -10,6 +11,7 @@ from lib.model.image_preprocessor import ImagePreprocessorModel
 class ModelManager:
     def __init__(self):
         self.models = {}
+        self.logger = logging.getLogger("logger")
 
     def get_or_create_model(self, modelName):
         if modelName not in self.models:
@@ -23,7 +25,7 @@ class ModelManager:
         try:
             model = model_factory(load_config(model_config_path))
         except Exception as e:
-            print(f"Error loading model {model_config_path}: {e}")
+            self.logger.error(f"Error loading model {model_config_path}: {e}")
             return None
         return model
     
