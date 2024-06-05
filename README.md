@@ -26,7 +26,7 @@ Before becoming a patron, please be aware of the following limitations:
 
 3. Unzip the contents of the release and place them where you want to run the server from.
 
-4. Download any models you want to use from patreon and paste the contents of that zip file into the directory you just created.
+4. Download any models you want to use from patreon and paste the contents of that zip file into the directory you just created. (Paste the models folder itself into the main server folder)
 
 5. Run the following command to create a new Conda environment:
     ```bash
