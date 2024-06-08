@@ -1,4 +1,6 @@
 from lib.async_lib.async_processing import QueueItem
+from lib.model.ai_model import AIModel
+from lib.model.video_preprocessor import VideoPreprocessorModel
 
 class ModelWrapper:
     def __init__(self, model, inputs, outputs):
@@ -46,6 +48,18 @@ class Pipeline:
     async def start_model_processing(self):
         for model in self.models:
             await model.model.start_workers()
+
+    def get_first_video_preprocessor(self):
+        for model in self.models:
+            if isinstance(model.model.model, VideoPreprocessorModel):
+                return model.model.model
+        return None
+    
+    def get_first_ai_model(self):
+        for model in self.models:
+            if isinstance(model.model.model, AIModel):
+                return model.model.model
+        return None
 
 def validate_string_list(input_list):
     if not isinstance(input_list, list):

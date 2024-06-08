@@ -21,15 +21,16 @@ class VideoPreprocessorModel(Model):
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
                 use_timestamps = itemFuture[item.input_names[1]]
+                frame_interval = itemFuture[item.input_names[2]] or self.frame_interval
                 children = []
                 i = -1
                 oldTime = time.time()
-                for frame_index, frame in preprocess_video(input_data, self.frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps):
+                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime
                     oldTime = newTime
-                    data = {item.output_names[1]: frame, item.output_names[2]: frame_index}
+                    data = {item.output_names[1]: frame, item.output_names[2]: frame_index, item.output_names[3]: itemFuture[item.input_names[3]], item.output_names[4]: itemFuture[item.input_names[4]]}
                     result = await ItemFuture.create(item, data, item.item_future.handler)
                     children.append(result)
                 self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {totalTime/i} seconds per frame.")

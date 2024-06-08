@@ -80,10 +80,11 @@ class ModelProcessor():
                 else:
                     break
 
-            await self.model.worker_function(batch_data)
-
-            for _ in batch_data:
-                self.queue.task_done()
+            try :
+                await self.model.worker_function_wrapper(batch_data)
+            finally:
+                for _ in batch_data:
+                    self.queue.task_done()
 
     async def start_workers(self):
         if self.workers_started:

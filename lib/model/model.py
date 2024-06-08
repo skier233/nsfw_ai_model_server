@@ -5,6 +5,13 @@ class Model:
         self.instance_count = configValues.get("instance_count", 1)
         self.max_batch_waits = configValues.get("max_batch_waits", -1)
 
+    async def worker_function_wrapper(self, data):
+        try:
+            await self.worker_function(data)
+        except Exception as e:
+            for item in data:
+                item.item_future.set_exception(e)
+
     async def worker_function(self, data):
         pass
 

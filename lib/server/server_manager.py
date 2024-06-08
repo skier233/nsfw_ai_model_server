@@ -1,14 +1,18 @@
+import asyncio
 from contextlib import asynccontextmanager
+import gc
 import logging
 import os
 import signal
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import torch
 from lib.config.config_utils import load_config
 from lib.logging.logger import setup_logger
 from lib.pipeline.pipeline_manager import PipelineManager
 from lib.server.exceptions import ServerStopException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 class ServerManager:
     def __init__(self):
@@ -38,6 +42,8 @@ class ServerManager:
             self.logger.error("No pipelines found in the configuration file.")
             raise ServerStopException("No pipelines found in the configuration file.")
         await self.pipeline_manager.load_pipelines(pipelines)
+        self.logger.info("Pipelines loaded successfully")
+        self.background_task = asyncio.create_task(check_inactivity())
 
     async def get_request_future(self, data, pipeline_name):
         return await self.pipeline_manager.get_request_future(data, pipeline_name)
@@ -48,7 +54,45 @@ async def lifespan(app: FastAPI):
     await server_manager.startup()
     yield
     pass
+
+class OutstandingRequestsMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app):
+        super().__init__(app)
+        self.outstanding_requests = 0
+        self.last_request_timestamp = asyncio.get_event_loop().time()
+
+    async def dispatch(self, request: Request, call_next):
+        self.outstanding_requests += 1
+        self.last_request_timestamp = asyncio.get_event_loop().time()
+        response = await call_next(request)
+        self.outstanding_requests -= 1
+        return response
+    
 app = FastAPI(lifespan=lifespan)
+
+outstanding_requests_middleware = OutstandingRequestsMiddleware(app)
+app.add_middleware(BaseHTTPMiddleware, dispatch=outstanding_requests_middleware.dispatch)
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Outstanding-Requests"] = str(outstanding_requests_middleware.outstanding_requests)
+    return response
+
+last_request_timestamp = 0
+
+async def check_inactivity():
+    global last_request_timestamp
+    while True:
+        await asyncio.sleep(300)  # check every 5 minutes
+        middleware = outstanding_requests_middleware
+        if middleware.outstanding_requests == 0 and asyncio.get_event_loop().time() - middleware.last_request_timestamp > 300 and middleware.last_request_timestamp > last_request_timestamp:
+            last_request_timestamp = middleware.last_request_timestamp
+            # no requests in the last 10 minutes
+            print("No requests in the last 5 minutes, Clearing cached memory")
+            torch.cuda.empty_cache()
+            gc.collect()
+
 server_manager = ServerManager()
 
 origins = [

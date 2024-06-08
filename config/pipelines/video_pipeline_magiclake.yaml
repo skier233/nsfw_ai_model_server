@@ -6,10 +6,10 @@ inputs:
   - return_confidence
 output: results
 short_name: actiondetection
-version: 1.0
+version: 2.0
 
 models:
-  - name: video_preprocessor
+  - name: video_preprocessor384
     inputs:
       - video_path
       - return_timestamps
@@ -22,7 +22,7 @@ models:
       - frame_index
       - threshold
       - return_confidence
-  - name: giddy_music
+  - name: magic_lake
     inputs:
       - preprocessed_image
       - threshold

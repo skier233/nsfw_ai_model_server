@@ -13,6 +13,7 @@ class AIModel(Model):
         self.model_license_name = configValues.get("model_license_name", None)
         self.model_threshold = configValues.get("model_threshold", None)
         self.model_return_tags = configValues.get("model_return_tags", False)
+        self.model_return_confidence = configValues.get("model_return_confidence", False)
         self.device = configValues.get("device", None)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
@@ -34,18 +35,27 @@ class AIModel(Model):
         for i, item in enumerate(data):
             itemFuture = item.item_future
             images[i] = itemFuture[item.input_names[0]]
+
         curr = time.time()
         results = self.model.process_images(images)
         logger = logging.getLogger("logger")
         logger.debug(f"Processed {len(images)} images in {time.time() - curr}")
-        if self.model_threshold is not None:
-            results = (results > self.model_threshold)
-            if self.model_return_tags:
-                results = [[self.tags[i] for i, tag in enumerate(result) if tag.item()] for result in results]
 
-        for item, result in zip(data, results):
-            itemFuture = item.item_future
-            await itemFuture.set_data(item.output_names[0], result)
+        for i, item in enumerate(data):
+            item_future = item.item_future
+            threshold = item_future[item.input_names[1]] or self.model_threshold
+            return_confidence = self.model_return_confidence
+            if item_future[item.input_names[2]] is not None:
+                return_confidence = item_future[item.input_names[2]]
+            result = results[i]
+            if threshold is not None:
+                if return_confidence:
+                    result = [(self.tags[i], round(confidence.item(), 2)) for i, confidence in enumerate(result) if confidence.item() > threshold]
+                else:
+                    result = (result > threshold)
+                    if self.model_return_tags:
+                        result = [self.tags[i] for i, tag in enumerate(result) if tag.item()]
+            await item_future.set_data(item.output_names[0], result)
 
     async def load(self):
         if self.model is None:

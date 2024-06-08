@@ -4,15 +4,15 @@ inputs:
   - return_confidence
 output: result
 short_name: actiondetection
-version: 1.0
+version: 2.0
 
 models:
-  - name: image_preprocessor
+  - name: image_preprocessor384
     inputs:
       - image_path
     outputs:
       - preprocessed_image
-  - name: giddy_music
+  - name: magic_lake
     inputs:
       - preprocessed_image
       - threshold
