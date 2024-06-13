@@ -5,8 +5,8 @@ channels:
   - nvidia
 dependencies:
   - python=3.11
-  - pytorch=2.3.0
-  - torchvision=0.18.0
+  - pytorch=2.3.1
+  - torchvision=0.18.1
   - pytorch-cuda=12.1
   - pyyaml
   - pip

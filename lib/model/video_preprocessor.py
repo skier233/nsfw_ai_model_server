@@ -22,10 +22,11 @@ class VideoPreprocessorModel(Model):
                 input_data = itemFuture[item.input_names[0]]
                 use_timestamps = itemFuture[item.input_names[1]]
                 frame_interval = itemFuture[item.input_names[2]] or self.frame_interval
+                vr_video = itemFuture[item.input_names[5]]
                 children = []
                 i = -1
                 oldTime = time.time()
-                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps):
+                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime

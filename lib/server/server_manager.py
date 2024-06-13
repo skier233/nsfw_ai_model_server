@@ -64,7 +64,10 @@ class OutstandingRequestsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         self.outstanding_requests += 1
         self.last_request_timestamp = asyncio.get_event_loop().time()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as e:
+            response = JSONResponse({"detail": str(e)}, status_code=500)
         self.outstanding_requests -= 1
         return response
     
@@ -75,7 +78,10 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=outstanding_requests_middleware.
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        response = JSONResponse({"detail": str(e)}, status_code=500)
     response.headers["X-Outstanding-Requests"] = str(outstanding_requests_middleware.outstanding_requests)
     return response
 
