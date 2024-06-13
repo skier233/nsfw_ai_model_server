@@ -43,15 +43,9 @@ Before becoming a patron, please be aware of the following limitations:
     ```bash
     python server.py
     ```
-8. On the first time running the server, it will give you a link to a form to fill out and a code. Fill out that form with the provided code, license name, and your Patreon username.
+8. On the first time running the server, it will open a browser window to login with patreon to get your license.
 
-9. You will receive a license file within 24 hours which you should put inside the `models` folder.
-
-10. Run the server again:
-    ```bash
-    python server.py
-    ```
-11. To test the server, you can run the example client from the `example_client` folder.
+9. To test the server, you can run the example client from the `example_client` folder.
 
 ## Updating Instructions
 
