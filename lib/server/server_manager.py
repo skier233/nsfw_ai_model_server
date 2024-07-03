@@ -13,6 +13,16 @@ from lib.pipeline.pipeline_manager import PipelineManager
 from lib.server.exceptions import ServerStopException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+import requests
+
+def get_latest_release_version(logger):
+    api_url = "https://api.github.com/repos/skier233/nsfw_ai_model_server/releases/latest"
+    try:
+        response = requests.get(api_url)
+        latest_release = response.json()
+        return latest_release['tag_name']
+    except:
+        logger.warning("Failed to get the latest release version from GitHub to see if an update is needed. Are you offline?")
 
 class ServerManager:
     def __init__(self):
@@ -24,6 +34,11 @@ class ServerManager:
         loglevel = config.get("loglevel", "INFO")
         setup_logger("logger", loglevel)
         self.logger = logging.getLogger("logger")
+        version = config.get("VERSION", "1.3.1")
+        latest_version = get_latest_release_version(self.logger)
+        self.logger.debug(f"Current version: {version}, Latest version: {latest_version}")
+        if version != latest_version:
+            self.logger.warning("There is a new version available! Please update the server using update.sh or update.ps1")
         self.config = config
         self.pipeline_manager = PipelineManager()
         self.default_image_pipeline = config.get("default_image_pipeline", None)
