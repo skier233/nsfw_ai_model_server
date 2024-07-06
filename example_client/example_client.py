@@ -26,11 +26,11 @@ async def call_api_async(session, endpoint, payload):
 
 async def process_images_async(image_paths):
     async with aiohttp.ClientSession() as session:
-        return await call_api_async(session, 'process_images/', {"paths": image_paths})
+        return await call_api_async(session, 'process_images/', {"paths": image_paths, "threshold": 0.5})
 
 async def process_videos_async(video_paths):
     async with aiohttp.ClientSession() as session:
-        return await call_api_async(session, 'process_video/', {"path": video_paths})
+        return await call_api_async(session, 'process_video/', {"path": video_paths, "frame_interval": 2, "threshold": 0.5, "return_confidence": False})
     
 def save_video_results_to_csv(video_results):
     # # Write results to CSV
