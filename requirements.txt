@@ -1,0 +1,11 @@
+torch==2.3.1
+torchvision==0.18.1
+pyyaml
+decord
+fastapi==0.111.0
+pycryptodomex==3.20.0
+uvicorn==0.29.0
+requests
+aiohttp
+colorlog
+psutil
