@@ -22,31 +22,18 @@ Before becoming a patron, please be aware of the following limitations:
 
 1. Install Conda: You can download and install Conda from [here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html). Follow the instructions based on your operating system.
 
-2. Install the newest release from the [releases tab](https://github.com/skier233/nsfw_ai_model_server/releases) in this GitHub repository.
+2. Download the newest release from the [releases tab](https://github.com/skier233/nsfw_ai_model_server/releases) in this GitHub repository.
 
 3. Unzip the contents of the release and place them where you want to run the server from.
 
 4. Download any models you want to use from patreon and paste the models folder from that zip file into the top level directory you just created.
 
-5. Run the following command to create a new Conda environment:
-    ```bash
-    conda env create -f environment-{osname}.yml
-    ```
-    Replace `{osname}` with `windows` or `linux` based on your operating system.
+5. Run (windows) `.\install.ps1` or (linux) `source .\install.sh`
+   
+6. On the first time running the server, it will open a browser window to login with patreon to get your license.
 
-6. Activate the Conda environment:
-    ```bash
-    conda activate ai_model_server
-    ```
-
-7. Start the server:
-    ```bash
-    python server.py
-    ```
-8. On the first time running the server, it will open a browser window to login with patreon to get your license.
-
-9. To test the server, you can run the example client from the `example_client` folder.
+7. To test the server, you can run the example client from the `example_client` folder or proceed with installing the stash plugin.
 
 ## Updating Instructions
 
-To update from a previous version, copy the contents of the zip file onto your existing directory, and then run update.ps1 or update.sh to upgrade your environment. 
+To update from a previous version run (windows) `.\update.ps1` or (linux) `source .\update.sh`
