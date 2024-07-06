@@ -37,3 +37,53 @@ Before becoming a patron, please be aware of the following limitations:
 ## Updating Instructions
 
 To update from a previous version run (windows) `.\update.ps1` or (linux) `source .\update.sh`
+
+## Optional: Using Docker
+
+### Prerequisites
+
+1. Ensure Docker is installed on your system. You can download and install Docker from [here](https://docs.docker.com/get-docker/).
+
+2. For GPU support, ensure you have the NVIDIA Container Toolkit installed. Follow the steps below to install it:
+
+   - **Ubuntu:**
+
+     ```sh
+     sudo apt-get update
+     sudo apt-get install -y nvidia-container-toolkit
+     sudo systemctl restart docker
+     ```
+
+   - **Windows:**
+
+     Follow the instructions [here](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) to set up the NVIDIA Container Toolkit on Windows.
+
+### Building the Docker Container
+
+1. Navigate to the directory where you unzipped the release.
+
+2. Build the Docker image using the following command:
+
+   ```sh
+   docker build -t ai_model_server .
+3. Modify the docker-compose.yml in the directory and modify this section with any paths to your content you want the ai server to be able to tag:
+   ```sh
+      - type: bind
+        source: C:/Example/Media/Images/Folder
+        target: /media/images/folder
+        read_only: true
+      - type: bind
+        source: C:/Example/Media/Images/Folder2
+        target: /media/images/folder2
+        read_only: true
+     ```
+4. run `docker compose up` to start the server.
+5. The first time you run the server, it'll try to authenticate with a browser and fail (since it can't start a browser in docker) and give you a form to fill out to request a license.
+      After submitting the form you'll receive the license over patreon dms. Put the license file in your models folder and run `docker compose up` again.
+6. The server will expect paths in the format of the `target` format above. If you send paths to the server that are paths from the host operating system it will not be able to see them. If you're using the official stash plugin, you can use the new path_mutation value in the config.py file in the plugin directory to mutate paths from stash that are sent to the server. If stash is also running in a docker container then you can use the same paths for the target in step 3 as in the stash container and then mutation will not be needed. If stash is not running in a docker container then you'll want to add each path you defined above to the path_mutation dictionary like so:
+   ```sh
+   path_mutation = {"C:/Example/Media/Images/Folder": "/media/images/folder", "C:/Example/Media/Images/Folder2", "/media/images/folder2"}
+   ```
+ 
+
+
