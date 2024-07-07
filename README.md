@@ -85,5 +85,6 @@ To update from a previous version run (windows) `.\update.ps1` or (linux) `sourc
    path_mutation = {"C:/Example/Media/Images/Folder": "/media/images/folder", "C:/Example/Media/Images/Folder2", "/media/images/folder2"}
    ```
  
-
-
+### Docker Updating Instructions
+To update from a previous version run (windows) `.\update.ps1` or (linux) `source .\update.sh`.
+Then, rebuild the docker container again using step 2 above.
