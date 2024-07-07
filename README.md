@@ -66,21 +66,11 @@ To update from a previous version run (windows) `.\update.ps1` or (linux) `sourc
 
    ```sh
    docker build -t ai_model_server .
-3. Modify the docker-compose.yml in the directory and modify this section with any paths to your content you want the ai server to be able to tag:
-   ```sh
-      - type: bind
-        source: C:/Example/Media/Images/Folder
-        target: /media/images/folder
-        read_only: true
-      - type: bind
-        source: C:/Example/Media/Images/Folder2
-        target: /media/images/folder2
-        read_only: true
-     ```
-4. run `docker compose up` to start the server.
+3. Start the docker container using the following command: `docker run --gpus all -p 8000:8000 -p 7483:7483 -v C:/Example/Media/Images/Folder:/media/images/folder:ro -v .\:/app ai_model_server`
+      Modify the command and add in the paths to your media folders like the Example/Media path above.
 5. The first time you run the server, it'll try to authenticate with a browser and fail (since it can't start a browser in docker) and give you a form to fill out to request a license.
-      After submitting the form you'll receive the license over patreon dms. Put the license file in your models folder and run `docker compose up` again.
-6. The server will expect paths in the format of the `target` format above. If you send paths to the server that are paths from the host operating system it will not be able to see them. If you're using the official stash plugin, you can use the new path_mutation value in the config.py file in the plugin directory to mutate paths from stash that are sent to the server. If stash is also running in a docker container then you can use the same paths for the target in step 3 as in the stash container and then mutation will not be needed. If stash is not running in a docker container then you'll want to add each path you defined above to the path_mutation dictionary like so:
+      After submitting the form you'll receive the license over patreon dms. Put the license file in your models folder and run the command in 3. again.
+6. The server will expect paths in the format of the second value in the format of the second paths of the media mounts (`/media/images/folder` in the example above). If you send paths to the server that are paths from the host operating system it will not be able to see them. If you're using the official stash plugin, you can use the new path_mutation value in the config.py file in the plugin directory to mutate paths from stash that are sent to the server. If stash is also running in a docker container then you can use the same paths for the target in step 3 as in the stash container and then mutation will not be needed. If stash is not running in a docker container then you'll want to add each path you defined above to the path_mutation dictionary like so:
    ```sh
    path_mutation = {"C:/Example/Media/Images/Folder": "/media/images/folder", "C:/Example/Media/Images/Folder2", "/media/images/folder2"}
    ```
