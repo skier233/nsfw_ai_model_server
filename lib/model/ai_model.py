@@ -9,6 +9,7 @@ class AIModel(Model):
     def __init__(self, configValues):
         Model.__init__(self, configValues)
         self.max_model_batch_size = configValues.get("max_model_batch_size", 12)
+        self.batch_size_per_VRAM_GB = configValues.get("batch_size_per_VRAM_GB", None)
         self.model_file_name = configValues.get("model_file_name", None)
         self.model_license_name = configValues.get("model_license_name", None)
         self.model_threshold = configValues.get("model_threshold", None)
@@ -24,6 +25,16 @@ class AIModel(Model):
             self.localdevice = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.localdevice = torch.device(self.device)
+
+        if self.batch_size_per_VRAM_GB is not None:
+            gpuMemory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            scaledBatchSize = custom_round(self.batch_size_per_VRAM_GB * gpuMemory)
+            if self.max_model_batch_size == -1:
+                self.max_model_batch_size = scaledBatchSize
+                self.max_batch_size = scaledBatchSize
+                self.max_queue_size = scaledBatchSize
+                self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB")
+                
     
 
     async def worker_function(self, data):
@@ -38,8 +49,7 @@ class AIModel(Model):
 
         curr = time.time()
         results = self.model.process_images(images)
-        logger = logging.getLogger("logger")
-        logger.debug(f"Processed {len(images)} images in {time.time() - curr}")
+        self.logger.debug(f"Processed {len(images)} images in {time.time() - curr}")
 
         for i, item in enumerate(data):
             item_future = item.item_future
@@ -80,3 +90,13 @@ def get_index_to_tag_mapping(path):
         for index, tag in enumerate(file):
             index_to_tag[index] = tag.strip()  # Remove any leading/trailing whitespace
     return index_to_tag
+
+def custom_round(value):
+    # Calculate the difference between the value and the next highest integer
+    difference = -value % 1
+    # If the difference is less than or equal to 0.1, round up
+    if difference <= 0.1:
+        return int(value) + 1
+    # Otherwise, round down
+    else:
+        return int(value)
