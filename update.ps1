@@ -1,9 +1,25 @@
-# Ensure the PSYaml module is installed
-if (-not (Get-Module -ListAvailable -Name PSYaml)) {
-    Install-Module -Name PSYaml -Force -Scope CurrentUser
+function Install-YamlDotNet {
+    $nugetUrl = "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe"
+    $nugetExePath = ".\nuget.exe"
+    
+    if (-not (Test-Path $nugetExePath)) {
+        Write-Host "Downloading NuGet.exe"
+        Invoke-WebRequest -Uri $nugetUrl -OutFile $nugetExePath
+    }
+
+    $yamlDotNetDll = ".\YamlDotNet.dll"
+    if (-not (Test-Path $yamlDotNetDll)) {
+        Write-Host "Downloading YamlDotNet"
+        & $nugetExePath install YamlDotNet -OutputDirectory . -ExcludeVersion
+        Copy-Item ".\YamlDotNet\lib\netstandard2.0\YamlDotNet.dll" $yamlDotNetDll -Force
+    }
+
+    Write-Host "Loading YamlDotNet"
+    Add-Type -Path $yamlDotNetDll
 }
 
-Import-Module PSYaml
+# Install and load YamlDotNet
+Install-YamlDotNet
 
 # Function to get the latest release version from GitHub
 function Get-LatestReleaseVersion {
@@ -26,7 +42,9 @@ function Load-YamlFile {
     param (
         [string]$filePath
     )
-    return ConvertFrom-Yaml (Get-Content $filePath -Raw)
+    $yaml = [YamlDotNet.Serialization.Deserializer]::new()
+    $reader = [System.IO.StreamReader]::new($filePath)
+    return $yaml.Deserialize([System.IO.TextReader]$reader)
 }
 
 function Save-YamlFile {
@@ -34,8 +52,10 @@ function Save-YamlFile {
         [hashtable]$data,
         [string]$filePath
     )
-    $yamlContent = ConvertTo-Yaml $data
-    Set-Content -Path $filePath -Value $yamlContent
+    $yaml = [YamlDotNet.Serialization.Serializer]::new()
+    $writer = [System.IO.StreamWriter]::new($filePath)
+    $yaml.Serialize([System.IO.TextWriter]$writer, $data)
+    $writer.Close()
 }
 
 function Merge-Yaml {
