@@ -34,7 +34,13 @@ class ServerManager:
         loglevel = config.get("loglevel", "INFO")
         setup_logger("logger", loglevel)
         self.logger = logging.getLogger("logger")
-        version = config.get("VERSION", "1.3.1")
+        self.port = config.get("port", 8000)
+
+        version_path = "./config/version.yaml"
+        if os.path.exists(version_path):
+            versionconfig = load_config(version_path, default_config={})
+        version = versionconfig.get("VERSION", "1.3.4")
+        
         latest_version = get_latest_release_version(self.logger)
         self.logger.debug(f"Current version: {version}, Latest version: {latest_version}")
         if version != latest_version:
@@ -86,6 +92,8 @@ class OutstandingRequestsMiddleware(BaseHTTPMiddleware):
         self.outstanding_requests -= 1
         return response
     
+server_manager = ServerManager()
+port = server_manager.port
 app = FastAPI(lifespan=lifespan)
 
 outstanding_requests_middleware = OutstandingRequestsMiddleware(app)
@@ -113,8 +121,6 @@ async def check_inactivity():
             print("No requests in the last 5 minutes, Clearing cached memory")
             torch.cuda.empty_cache()
             gc.collect()
-
-server_manager = ServerManager()
 
 origins = [
     "*",  # Replace with the actual origins you need

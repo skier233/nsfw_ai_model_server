@@ -1,5 +1,5 @@
 import os
-from lib.server.server_manager import app
+from lib.server.server_manager import app, port
 import lib.server.routes
 import uvicorn
 import signal
@@ -12,7 +12,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 
 if __name__ == "__main__":
-    config = Config(app, host="0.0.0.0", port=8000)
+    config = Config(app, host="0.0.0.0", port=port)
     server = Server(config)
 
     async def stop_servers():
