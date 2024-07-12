@@ -1,26 +1,3 @@
-function Install-YamlDotNet {
-    $nugetUrl = "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe"
-    $nugetExePath = ".\nuget.exe"
-    
-    if (-not (Test-Path $nugetExePath)) {
-        Write-Host "Downloading NuGet.exe"
-        Invoke-WebRequest -Uri $nugetUrl -OutFile $nugetExePath
-    }
-
-    $yamlDotNetDll = ".\YamlDotNet.dll"
-    if (-not (Test-Path $yamlDotNetDll)) {
-        Write-Host "Downloading YamlDotNet"
-        & $nugetExePath install YamlDotNet -OutputDirectory . -ExcludeVersion
-        Copy-Item ".\YamlDotNet\lib\netstandard2.0\YamlDotNet.dll" $yamlDotNetDll -Force
-    }
-
-    Write-Host "Loading YamlDotNet"
-    Add-Type -Path $yamlDotNetDll
-}
-
-# Install and load YamlDotNet
-Install-YamlDotNet
-
 # Function to get the latest release version from GitHub
 function Get-LatestReleaseVersion {
     $apiUrl = "https://api.github.com/repos/skier233/nsfw_ai_model_server/releases/latest"
@@ -30,55 +7,12 @@ function Get-LatestReleaseVersion {
 
 # Function to read the local version from config.yaml
 function Get-LocalVersion {
-    $configPath = "./config/config.yaml"
+    $configPath = "./config/version.yaml"
     $configContent = Get-Content $configPath -Raw
     if ($configContent -match 'VERSION:\s*(\S+)') {
         return $matches[1]
     }
     return $null
-}
-
-function Load-YamlFile {
-    param (
-        [string]$filePath
-    )
-    $yaml = [YamlDotNet.Serialization.Deserializer]::new()
-    $reader = [System.IO.StreamReader]::new($filePath)
-    return $yaml.Deserialize([System.IO.TextReader]$reader)
-}
-
-function Save-YamlFile {
-    param (
-        [hashtable]$data,
-        [string]$filePath
-    )
-    $yaml = [YamlDotNet.Serialization.Serializer]::new()
-    $writer = [System.IO.StreamWriter]::new($filePath)
-    $yaml.Serialize([System.IO.TextWriter]$writer, $data)
-    $writer.Close()
-}
-
-function Merge-Yaml {
-    param (
-        [hashtable]$userConfig,
-        [hashtable]$newConfig
-    )
-    foreach ($key in $newConfig.Keys) {
-        if ($userConfig.ContainsKey($key)) {
-            if ($userConfig[$key] -is [hashtable] -and $newConfig[$key] -is [hashtable]) {
-                $userConfig[$key] = Merge-Yaml -userConfig $userConfig[$key] -newConfig $newConfig[$key]
-            } elseif ($userConfig[$key] -is [array] -and $newConfig[$key] -is [array]) {
-                $userConfig[$key] += $newConfig[$key] | Where-Object { $_ -notin $userConfig[$key] }
-            } else {
-                if ($userConfig[$key] -notmatch '# preserve') {
-                    $userConfig[$key] = $newConfig[$key]
-                }
-            }
-        } else {
-            $userConfig[$key] = $newConfig[$key]
-        }
-    }
-    return $userConfig
 }
 
 $latestVersion = Get-LatestReleaseVersion
@@ -99,27 +33,11 @@ Invoke-WebRequest $download -OutFile $zip
 Write-Host "Extracting release files to temporary directory"
 Expand-Archive $zip -DestinationPath $tempDir -Force
 
-
-$localConfigDir = "./config"
-$newConfigDir = "$tempDir/config"
-# Get all local yaml files
-$localYamlFiles = Get-ChildItem -Path $localConfigDir -Filter *.yaml -Recurse
-
-foreach ($localYamlFile in $localYamlFiles) {
-    $relativePath = $localYamlFile.FullName.Substring((Get-Location).Path.Length + $localConfigDir.Length + 1)
-    $newYamlFile = Join-Path $newConfigDir $relativePath
-
-    if (Test-Path $newYamlFile) {
-        Write-Host "Merging $localYamlFile with $newYamlFile"
-        $userConfig = Load-YamlFile -filePath $localYamlFile.FullName
-        $newConfig = Load-YamlFile -filePath $newYamlFile
-
-        $mergedConfig = Merge-Yaml -userConfig $userConfig -newConfig $newConfig
-
-        Save-YamlFile -data $mergedConfig -filePath $localYamlFile.FullName
-    } else {
-        Write-Host "New configuration file $newYamlFile does not exist. Skipping."
-    }
+# Delete /config/config.yaml if it exists in the temporary directory
+$configFilePath = Join-Path $tempDir "config\config.yaml"
+if (Test-Path $configFilePath) {
+    Write-Host "Deleting config.yaml from temporary directory to preserve existing configuration"
+    Remove-Item $configFilePath -Force
 }
 
 Write-Host "Copying files to the current directory"

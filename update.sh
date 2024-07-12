@@ -14,7 +14,7 @@ get_latest_release_version() {
 
 # Function to read the local version from config.yaml
 get_local_version() {
-    configPath="./config/config.yaml"
+    configPath="./config/version.yaml"
     if [[ -f "$configPath" ]]; then
         localVersion=$(grep 'VERSION:' $configPath | awk '{print $2}')
         echo $localVersion
@@ -43,6 +43,13 @@ wget -O $zip $download
 echo "Extracting release files to temporary directory"
 mkdir -p $tempDir
 unzip -o $zip -d $tempDir
+
+# Delete /config/config.yaml if it exists in the temporary directory
+configFilePath="$tempDir/config/config.yaml"
+if [ -f "$configFilePath" ]; then
+    echo "Deleting config.yaml from temporary directory to preserve existing configuration"
+    rm -f "$configFilePath"
+fi
 
 echo "Copying files to the current directory"
 echo "debug 1"
