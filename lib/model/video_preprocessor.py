@@ -1,6 +1,5 @@
 import logging
 import time
-from ai_processing import preprocess_video
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
 
@@ -12,6 +11,13 @@ class VideoPreprocessorModel(Model):
         self.frame_interval = configValues.get("frame_interval", 0.5)
         self.use_half_precision = configValues.get("use_half_precision", True)
         self.device = configValues.get("device", None)
+        self.free_model = configValues.get("free_model", False)
+        if self.free_model:
+            from lib.model.preprocessing_python.image_preprocessing import preprocess_video as preprocess_video2
+            self.preprocess_video = preprocess_video2
+        else:
+            from ai_processing import preprocess_video
+            self.preprocess_video = preprocess_video
         self.logger = logging.getLogger("logger")
     
     async def worker_function(self, data):
@@ -26,7 +32,7 @@ class VideoPreprocessorModel(Model):
                 children = []
                 i = -1
                 oldTime = time.time()
-                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video):
+                for frame_index, frame in self.preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime

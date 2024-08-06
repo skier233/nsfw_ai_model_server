@@ -1,8 +1,8 @@
 
 import logging
 import torch
-from ai_processing import ModelRunner
 from lib.model.model import Model
+from lib.model.ai_model_python.python_model import PythonModel
 import time
 
 class AIModel(Model):
@@ -18,8 +18,6 @@ class AIModel(Model):
         self.device = configValues.get("device", None)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
-        if self.model_license_name is None:
-            raise ValueError("model_license_name is required for models of type model")
         self.model = None
         if self.device is None:
             self.localdevice = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,7 +67,11 @@ class AIModel(Model):
 
     async def load(self):
         if self.model is None:
-            self.model = ModelRunner(f"./models/{self.model_file_name}.pt.enc", f"./models/{self.model_license_name}.lic", self.max_model_batch_size, self.device)
+            if self.model_license_name is None:
+                self.model = PythonModel(f"./models/{self.model_file_name}.pt", self.max_model_batch_size, self.device)
+            else:
+                from ai_processing import ModelRunner
+                self.model = ModelRunner(f"./models/{self.model_file_name}.pt.enc", f"./models/{self.model_license_name}.lic", self.max_model_batch_size, self.device)
             self.tags = get_index_to_tag_mapping(f"./models/{self.model_file_name}.tags.txt")
         else:
             self.model.load_model()

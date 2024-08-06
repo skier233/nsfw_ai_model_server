@@ -52,10 +52,8 @@ if [ -f "$configFilePath" ]; then
 fi
 
 echo "Copying files to the current directory"
-echo "debug 1"
 #TODO update update.sh at the end
 rsync -av --exclude='update.sh' $tempDir/* . || { echo "Failed to copy files."; exit 1; }
-echo "debug 2"
 echo "Cleaning up"
 rm -v -f $zip || { echo "Failed to remove the zip file."; exit 1; }
 rm -v -rf $tempDir || { echo "Failed to remove the temporary directory."; exit 1; }

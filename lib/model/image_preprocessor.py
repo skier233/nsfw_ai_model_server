@@ -1,6 +1,5 @@
 import logging
 import time
-from ai_processing import preprocess_image
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
 
@@ -11,6 +10,13 @@ class ImagePreprocessorModel(Model):
         self.image_size = configValues.get("image_size", 512)
         self.use_half_precision = configValues.get("use_half_precision", True)
         self.device = configValues.get("device", None)
+        self.free_model = configValues.get("free_model", False)
+        if self.free_model:
+            from lib.model.preprocessing_python.image_preprocessing import preprocess_image as preprocess_image2
+            self.preprocess_image = preprocess_image2
+        else:
+            from ai_processing import preprocess_image
+            self.preprocess_image = preprocess_image
         self.logger = logging.getLogger("logger")
     
     async def worker_function(self, data):
@@ -18,7 +24,7 @@ class ImagePreprocessorModel(Model):
             try:
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
-                preprocessed_frame = preprocess_image(input_data, self.image_size, self.use_half_precision, self.device)
+                preprocessed_frame = self.preprocess_image(input_data, self.image_size, self.use_half_precision, self.device)
                 await itemFuture.set_data(item.output_names[0], preprocessed_frame)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")

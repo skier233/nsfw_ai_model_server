@@ -1,5 +1,5 @@
-active_pipelines: ["video_pipeline_giddy", "image_pipeline_giddy"]
-default_image_pipeline: "image_pipeline_giddy"
-default_video_pipeline: "video_pipeline_giddy"
+active_pipelines: ["video_pipeline_vivid_galaxy", "image_pipeline_vivid_galaxy"]
+default_image_pipeline: "image_pipeline_vivid_galaxy"
+default_video_pipeline: "video_pipeline_vivid_galaxy"
 loglevel: "INFO"
 port: 8000
