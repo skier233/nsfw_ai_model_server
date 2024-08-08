@@ -13,7 +13,7 @@ The AI Models available here are state-of-the-art boasting far higher accuracy t
   - As these AI Models progress and more models are released covering even more tags, this data will be useful for content recommendation which will allow you to find new content that you would like based on content that you know you like already.
 
 ### Available Tags
-[List of Currently Available Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) 
+[List of Currently Supported Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) 
 
 [*Rough Draft* List of Future Tags](https://docs.google.com/spreadsheets/d/13dFiZDMqpoaeOWo-M4LBweOAwkcmetgzYHMdqGIK328/edit?usp=sharing)
 
