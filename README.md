@@ -18,4 +18,5 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 ## Installation Instructions
 [Installation Instructions](https://github.com/skier233/nsfw_ai_model_server/wiki/Installation-Instructions)
+
 [Docker Installation Instructions](https://github.com/skier233/nsfw_ai_model_server/wiki/Installation-Instructions-(Docker))
