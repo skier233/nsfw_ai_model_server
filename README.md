@@ -1,10 +1,21 @@
-# NSFW AI Model Server
+# NSFW AI Tagging: Enhance Your Local Content Organization
+This project is dedicated to creating and running AI models that can select appropriate tags for images and videos (including at timestamps in videos). Having this tag data for images and videos can provide invaluable information that can help manage content and find content without spending manual time hunting for the right videos or images.
 
-This repository is designed for hosting a local HTTP server to access state-of-the-art NSFW AI models created by [Skier](https://www.patreon.com/Skier). You will need to be a patron to get access to these models to be able to use them with this repository or use the free AI model.
+### Key Benefits of NSFW Tagging AI
+The AI Models available here are state-of-the-art boasting far higher accuracy than any other NSFW AI models anywhere on the internet. These models provide data which can be useful in many ways:
+* **Precision Time-Based Tagging**
+  - The AI delivers highly accurate time-based tags, making it easy for you to search and find specific content within a video without having to watch a full video to find the interesting action.
+* **Enhanced Searchability**
+  - By generating detailed tags, the AI helps you quickly locate desired images and videos, saving you time finding that right video.
+* **Improved Content Management**
+  - Using the AI results, you can better organize your content library and easily categorize content, delete unwanted content, and enable making it easier to find what you want, when you want.
+* **Future Content Recommendation**
+  - As these AI Models progress and more models are released covering even more tags, this data will be useful for content recommendation which will allow you to find new content that you would like based on content that you know you like already.
 
-The code here is built to be both fast, easy to install, and extendable.
+### Available Tags
+[List of Currently Available Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) 
 
-See more info on this project in the [Project Overview](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Project-Overview)
+[*Rough Draft* List of Future Tags](https://docs.google.com/spreadsheets/d/13dFiZDMqpoaeOWo-M4LBweOAwkcmetgzYHMdqGIK328/edit?usp=sharing)
 
 ## Limitations
 
@@ -18,7 +29,7 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 - The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues, but I cannot guarantee that the models will be able to run on your computer.
 
-## Installation Instructions
-[Installation Instructions](https://github.com/skier233/nsfw_ai_model_server/wiki/Installation-Instructions)
+### Get Started
+To see the benefits of NSFW AI Tagging yourself, feel free to join as a Patron Member or try the free AI Model:
 
-[Docker Installation Instructions](https://github.com/skier233/nsfw_ai_model_server/wiki/Installation-Instructions-(Docker))
+[Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
