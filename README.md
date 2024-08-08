@@ -3,6 +3,7 @@
 This repository is designed for hosting a local HTTP server to access state-of-the-art NSFW AI models created by [Skier](https://www.patreon.com/Skier). You will need to be a patron to get access to these models to be able to use them with this repository or use the free AI model.
 
 The code here is built to be both fast, easy to install, and extendable.
+
 See more info on this project in the [Project Overview](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Project-Overview)
 
 ## Limitations
