@@ -16,7 +16,7 @@ The AI models available here are state-of-the-art, boasting far higher accuracy 
   - Using the AI results, you can better organize your content library, easily categorize content, delete unwanted content, and find what you want when you want it.
 
 * **Future Content Recommendations**
-  - As these AI models progress and more models are released covering additional tags, the data will be useful for content recommendations. This will allow you to find new content that aligns with your interests based on what you already like.
+  - As these AI models progress and more models are released covering additional tags, the data will be useful for content recommendation systems. These will allow you to find new content that aligns with your interests based on what you already like.
 
 ## Available Tags
 
