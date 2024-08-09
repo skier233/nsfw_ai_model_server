@@ -35,6 +35,8 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 - **Complexity and Support**: Running machine learning models is complex and requires precise conditions to work smoothly. Although I have worked to make the installation process and AI model predictions as user-friendly as possible, due to the variability in hardware and software environments, there might be issues. I will do my best to help resolve any issues, but I cannot guarantee that the models will run on every computer.
 
+- **Model Access**: The most capable models are for paid patrons only because this project takes an enormous amount of time, and Patreon funds future development. There is a free model available with less tags for users that may not care about all the tags or want to try the AI before considering becoming a patron.
+
 ## Get Started
 
 To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
