@@ -37,17 +37,17 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 - **Model Access**: The most capable models are for paid patrons only because this project takes an enormous amount of time, and Patreon funds future development. There is a free model available with less tags for users that may not care about all the tags or want to try the AI before considering becoming a patron.
 
-## Get Started
-
-To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
-
-[Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
-
 ## Free Open Source vs Paid Models
 
 This project includes both a free open source AI model as well as several paid Patreon only models. The free AI model supports [10 tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) compared to the [36 currently supported tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) in the Patreon variant. The paid version also includes different model variations that have different tradeoffs between accuracy and speed as well as more AI models for additional tag categories. You can see the list of currently models here:
 [AI Model List](https://github.com/skier233/nsfw_ai_model_server/wiki/AI-Models)
 [Get Access to Patreon Models](https://www.patreon.com/Skier)
+
+## Get Started
+
+To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
+
+[Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
 
 ## Support
 
