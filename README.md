@@ -43,6 +43,12 @@ To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patr
 
 [Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
 
+## Free Open Source vs Paid Models
+
+This project includes both a free open source AI model as well as several paid Patreon only models. The free AI model supports [10 tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) compared to the [36 currently supported tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) in the Patreon variant. The paid version also includes different model variations that have different tradeoffs between accuracy and speed as well as more AI models for additional tag categories. You can see the list of currently models here:
+[AI Model List](https://github.com/skier233/nsfw_ai_model_server/wiki/AI-Models)
+[Get Access to Patreon Models](https://www.patreon.com/Skier)
+
 ## Support
 
 If you have any questions, run into issues when installing, or have ideas for the future or just want to chat about the project, feel free to join my [discord server](https://discord.gg/EvYbZBf) and I'd be happy to chat!
