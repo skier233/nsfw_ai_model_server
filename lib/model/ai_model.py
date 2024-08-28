@@ -16,6 +16,7 @@ class AIModel(Model):
         self.model_return_tags = configValues.get("model_return_tags", False)
         self.model_return_confidence = configValues.get("model_return_confidence", False)
         self.device = configValues.get("device", None)
+        self.fill_to_batch = configValues.get("fill_to_batch_size", True)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
         self.model = None
@@ -24,14 +25,18 @@ class AIModel(Model):
         else:
             self.localdevice = torch.device(self.device)
 
+        self.update_batch_with_mutli_models(1)
+    
+    def update_batch_with_mutli_models(self, model_count):
+        batch_multipliers = [1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
         if self.batch_size_per_VRAM_GB is not None:
+            batch_size_temp = self.batch_size_per_VRAM_GB * batch_multipliers[model_count - 1]
             gpuMemory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            scaledBatchSize = custom_round(self.batch_size_per_VRAM_GB * gpuMemory)
-            if self.max_model_batch_size == -1:
-                self.max_model_batch_size = scaledBatchSize
-                self.max_batch_size = scaledBatchSize
-                self.max_queue_size = scaledBatchSize
-                self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB")
+            scaledBatchSize = custom_round(batch_size_temp * gpuMemory)
+            self.max_model_batch_size = scaledBatchSize
+            self.max_batch_size = scaledBatchSize
+            self.max_queue_size = scaledBatchSize
+            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name}")
                 
     
 
@@ -67,8 +72,9 @@ class AIModel(Model):
 
     async def load(self):
         if self.model is None:
+            self.logger.info(f"Loading model {self.model_file_name} with batch size {self.max_model_batch_size}, {self.max_queue_size}, {self.max_batch_size}")
             if self.model_license_name is None:
-                self.model = PythonModel(f"./models/{self.model_file_name}.pt", self.max_model_batch_size, self.device)
+                self.model = PythonModel(f"./models/{self.model_file_name}.pt", self.max_model_batch_size, self.device, self.fill_to_batch)
             else:
                 from ai_processing import ModelRunner
                 self.model = ModelRunner(f"./models/{self.model_file_name}.pt.enc", f"./models/{self.model_license_name}.lic", self.max_model_batch_size, self.device)
@@ -94,11 +100,13 @@ def get_index_to_tag_mapping(path):
     return index_to_tag
 
 def custom_round(value):
-    # Calculate the difference between the value and the next highest integer
-    difference = -value % 1
-    # If the difference is less than or equal to 0.1, round up
-    if difference <= 0.1:
-        return int(value) + 1
-    # Otherwise, round down
-    else:
+    if value < 8:
         return int(value)
+    # Calculate the remainder when the value is divided by 8
+    remainder = int(value) % 8
+    # If the remainder is less than or equal to 4, round down
+    if remainder <= 5:
+        return int(value) - remainder
+    # Otherwise, round up
+    else:
+        return int(value) + (8 - remainder)

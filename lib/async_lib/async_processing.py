@@ -56,6 +56,15 @@ class ModelProcessor():
         self.workers_started = False
         self.failed_loading = False
 
+    def update_values_from_child_model(self):
+        self.instance_count = self.model.instance_count
+        if self.model.max_queue_size is None:
+            self.queue = asyncio.Queue()
+        else:
+            self.queue = asyncio.Queue(maxsize=self.model.max_queue_size)
+        self.max_batch_size = self.model.max_batch_size
+        self.max_batch_waits = self.model.max_batch_waits
+        
     async def add_to_queue(self, data):
         await self.queue.put(data)
 

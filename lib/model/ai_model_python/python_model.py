@@ -3,9 +3,10 @@ import gc
 import torch
 
 class PythonModel:
-    def __init__(self, path, batch_size, device):
+    def __init__(self, path, batch_size, device, fill_batch_size):
         self.model_path = path
         self.max_batch_size = batch_size
+        self.fill_batch_size = fill_batch_size
         if device:
             self.device = torch.device(device)
         else:
@@ -17,6 +18,12 @@ class PythonModel:
         
     def run_model(self, preprocessed_images, applySigmoid):
         preprocessed_images = preprocessed_images.to(self.device)
+        original_batch_size = preprocessed_images.size(0)
+        if self.fill_batch_size:
+            if preprocessed_images.size(0) < self.max_batch_size:
+                padding_size = self.max_batch_size - original_batch_size
+                padding = torch.zeros((padding_size, *preprocessed_images.shape[1:]), device=self.device)
+                preprocessed_images = torch.cat([preprocessed_images, padding], dim=0)
         if self.device.type == 'cuda' and preprocessed_images.dtype != torch.float16:
             preprocessed_images = preprocessed_images.half()  # Convert to half precision
         with torch.no_grad():
@@ -27,6 +34,9 @@ class PythonModel:
                 output = self.model(preprocessed_images)
             if applySigmoid:
                 output = torch.sigmoid(output)
+    
+        # Remove the outputs corresponding to the padding images
+        output = output[:original_batch_size]
         return output.cpu()
 
     def process_images(self, preprocessed_images, applySigmoid = True):
