@@ -1,80 +1,56 @@
-# NSFW AI Model Server
+# NSFW AI Tagging: Enhance Your Local Content Organization
 
-This repository is designed for hosting a local HTTP server to access state-of-the-art NSFW AI models created by [Skier](https://www.patreon.com/Skier). You will need to be a patron to get access to these models to be able to use them with this repository.
+This project is dedicated to creating and running AI models that can automatically select appropriate tags for images and videos (including at specific timestamps). Having this tag data for images and videos can provide invaluable information to help manage content and find content without spending manual time hunting for the right videos or images.
 
-The code here is built to be both fast, easy to install, and extendable.
+## Key Benefits of NSFW Tagging AI
+
+The AI models available here are state-of-the-art, boasting far higher accuracy than any other NSFW AI models found on the internet. These models provide data that can be useful in many ways:
+
+* **Precision Time-Based Tagging**
+  - The AI delivers highly accurate time-based tags, making it easy for you to search and find specific content within a video without having to watch the entire video to locate the interesting parts.
+
+* **Enhanced Searchability**
+  - By generating detailed tags, the AI helps you quickly locate desired images and videos, saving you time in finding that right video.
+
+* **Improved Content Management**
+  - Using the AI results, you can better organize your content library, easily categorize content, delete unwanted content, and find what you want when you want it.
+
+* **Future Content Recommendations**
+  - As these AI models progress and more models are released covering additional tags, the data will be useful for content recommendation systems. These will allow you to find new content that aligns with your interests based on what you already like.
+
+## Available Tags
+The main difference between the free model and the patreon models is the number of supported tags. See the supported tags of the free and Patreon models below along with a rough plan for future tags that will be added in the future:
+- [List of Currently Supported Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing)
+- [*Rough Draft* List of Future Tags](https://docs.google.com/spreadsheets/d/13dFiZDMqpoaeOWo-M4LBweOAwkcmetgzYHMdqGIK328/edit?usp=sharing)
 
 ## Limitations
 
-Before becoming a patron, please be aware of the following limitations:
+Before becoming a patron or installing the free model, please be aware of the following limitations:
 
-- As per the license, this code and associated models can only be used for personal local uses. For any for-profit use-cases or use-cases that need to be on the internet, [please contact](https://discord.gg/EvYbZBf) me for licensing options.
+- **Usage Restrictions**: This code and associated models can only be used for personal local use as per the license. For any for-profit use cases or use cases that require online deployment, [please contact](https://discord.gg/EvYbZBf) me for licensing options.
 
-- Only NVIDIA GPUs are supported. Any Nvidia GPUs older than NVIDIA1080 will likely not work. Support for AMD GPUs is not planned.
+- **Hardware Requirements**: Only NVIDIA GPUs are supported. Any NVIDIA GPUs older than the NVIDIA 1080 will likely not work. Support for AMD GPUs is not planned.
 
-- CPU is supported but it will be much slower than running on GPU.
+- **Performance on CPU**: While CPU is supported, it will be much slower compared to running on a GPU.
 
-- The nature of running machine learning models is very complex and requires everything to go precisely right to work smoothly. I've worked to make the installation process and AI model predictions as easy to use as possible but please understand that due to many people on different computers with different graphics cards and many other factors, there is a possibility you will run into issues. I will be here to help as best as I can to work through any of those issues, but I cannot guarantee that the models will be able to run on your computer.
+- **Complexity and Support**: Running machine learning models is complex and requires precise conditions to work smoothly. Although I have worked to make the installation process and AI model predictions as user-friendly as possible, due to the variability in hardware and software environments, there might be issues. I will do my best to help resolve any issues, but I cannot guarantee that the models will run on every computer.
 
-- There are currently no tools built to make use of the predictions that this server outputs so non-developers may not gain the most value from this project yet until some of those tools are created to consume this data in meaningful ways.
+- **Model Access**: The most capable models are for paid patrons only because this project takes an enormous amount of time, and Patreon funds future development. There is a free model available with less tags for users that may not care about all the tags or want to try the AI before considering becoming a patron.
 
-## Installation Instructions
+## Free Open Source vs Paid Models
 
-1. Install Conda: You can download and install Conda from [here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html). Follow the instructions based on your operating system.
+This project includes both a free open source AI model as well as several paid Patreon only models. The free AI model supports [10 tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) compared to the [36 currently supported tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) in the Patreon variant. The paid version also includes different model variations that have different tradeoffs between accuracy and speed as well as more AI models for additional tag categories. You can see the list of currently models here:
 
-2. Download the newest release from the [releases tab](https://github.com/skier233/nsfw_ai_model_server/releases) in this GitHub repository.
+[AI Model List](https://github.com/skier233/nsfw_ai_model_server/wiki/AI-Models)
 
-3. Unzip the contents of the release and place them where you want to run the server from.
+[Get Access to Patreon Models](https://www.patreon.com/Skier)
 
-4. Download any models you want to use from patreon and paste the models folder from that zip file into the top level directory you just created.
+## Get Started
 
-5. Run (windows) `.\install.ps1` or (linux) `source .\install.sh`
-   
-6. On the first time running the server, it will open a browser window to login with patreon to get your license.
+To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
 
-7. To test the server, you can run the example client from the `example_client` folder or proceed with installing the stash plugin.
+[Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
 
-## Updating Instructions
+## Support
 
-To update from a previous version run (windows) `.\update.ps1` or (linux) `source .\update.sh`
-
-## Optional: Using Docker
-
-### Prerequisites
-
-1. Ensure Docker is installed on your system. You can download and install Docker from [here](https://docs.docker.com/get-docker/).
-
-2. For GPU support, ensure you have the NVIDIA Container Toolkit installed. Follow the steps below to install it:
-
-   - **Ubuntu:**
-
-     ```sh
-     sudo apt-get update
-     sudo apt-get install -y nvidia-container-toolkit
-     sudo systemctl restart docker
-     ```
-
-   - **Windows:**
-
-     Follow the instructions [here](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) to set up the NVIDIA Container Toolkit on Windows.
-
-### Building the Docker Container
-
-1. Navigate to the directory where you unzipped the release.
-
-2. Build the Docker image using the following command:
-
-   ```sh
-   docker build -t ai_model_server .
-3. Start the docker container using the following command: `docker run --gpus all -p 8000:8000 -p 7483:7483 -v C:/Example/Media/Images/Folder:/media/images/folder:ro -v .\:/app ai_model_server`
-      Modify the command and add in the paths to your media folders like the Example/Media path above.
-5. The first time you run the server, it'll try to authenticate with a browser and fail (since it can't start a browser in docker) and give you a form to fill out to request a license.
-      After submitting the form you'll receive the license over patreon dms. Put the license file in your models folder and run the command in 3. again.
-6. The server will expect paths in the format of the second value in the format of the second paths of the media mounts (`/media/images/folder` in the example above). If you send paths to the server that are paths from the host operating system it will not be able to see them. If you're using the official stash plugin, you can use the new path_mutation value in the config.py file in the plugin directory to mutate paths from stash that are sent to the server. If stash is also running in a docker container then you can use the same paths for the target in step 3 as in the stash container and then mutation will not be needed. If stash is not running in a docker container then you'll want to add each path you defined above to the path_mutation dictionary like so:
-   ```sh
-   path_mutation = {"C:/Example/Media/Images/Folder": "/media/images/folder", "C:/Example/Media/Images/Folder2", "/media/images/folder2"}
-   ```
- 
-### Docker Updating Instructions
-To update from a previous version run (windows) `.\update.ps1` or (linux) `source .\update.sh`.
-Then, rebuild the docker container again using step 2 above.
+If you have any questions, run into issues when installing, or have ideas for the future or just want to chat about the project, feel free to join my [discord server](https://discord.gg/EvYbZBf) and I'd be happy to chat!
