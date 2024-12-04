@@ -20,6 +20,8 @@ The AI models available here are state-of-the-art, boasting far higher accuracy 
 
 ## Available Tags
 The main difference between the free model and the patreon models is the number of supported tags. See the supported tags of the free and Patreon models below along with a rough plan for future tags that will be added in the future:
+
+Current total supported tags: **105**
 - [List of Currently Supported Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing)
 - [*Rough Draft* List of Future Tags](https://docs.google.com/spreadsheets/d/13dFiZDMqpoaeOWo-M4LBweOAwkcmetgzYHMdqGIK328/edit?usp=sharing)
 
