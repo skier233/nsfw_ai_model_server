@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 # Install Python 3.12
 RUN apt-get update && apt-get install -y software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && apt-get install -y python3.12 python3.12-distutils && \
+    apt-get update && apt-get install -y python3.12 && \
     wget https://bootstrap.pypa.io/get-pip.py && \
     python3.12 get-pip.py && \
     rm get-pip.py
