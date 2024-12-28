@@ -15,31 +15,10 @@ class VideoPathList(BaseModel):
     threshold: float = None
     return_confidence: bool = None
     vr_video: bool = False
+    existing_json_data: Any = None
 
 class VideoResult(BaseModel):
     result: Any
-    pipeline_short_name: str
-    pipeline_version: float
-    threshold: float
-    frame_interval: float
-    return_confidence: bool
-
-class VideoPipelineInfo(BaseModel):
-    pipeline_short_name: str
-    pipeline_version: float
-    threshold: float
-    frame_interval: float
-    return_confidence: bool
-
-class ImagePipelineInfo(BaseModel):
-    pipeline_short_name: str
-    pipeline_version: float
-    threshold: float
-    return_confidence: bool
 
 class ImageResult(BaseModel):
     result: Any
-    pipeline_short_name: str
-    pipeline_version: float
-    threshold: float
-    return_confidence: bool

@@ -31,7 +31,9 @@ class ImagePreprocessorModel(Model):
                 itemFuture.set_exception(fnf_error)
             except IOError as io_error:
                 self.logger.error(f"IO error (image might be corrupted): {io_error}")
+                self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(io_error)
             except Exception as e:
                 self.logger.error(f"An unexpected error occurred: {e}")
+                self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(e)

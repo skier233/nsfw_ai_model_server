@@ -37,17 +37,20 @@ class VideoPreprocessorModel(Model):
                     newTime = time.time()
                     totalTime += newTime - oldTime
                     oldTime = newTime
-                    data = {item.output_names[1]: frame, item.output_names[2]: frame_index, item.output_names[3]: itemFuture[item.input_names[3]], item.output_names[4]: itemFuture[item.input_names[4]]}
+                    data = {item.output_names[1]: frame, item.output_names[2]: frame_index, item.output_names[3]: itemFuture[item.input_names[3]], item.output_names[4]: itemFuture[item.input_names[4]], item.output_names[5]: itemFuture[item.input_names[6]]}
                     result = await ItemFuture.create(item, data, item.item_future.handler)
                     children.append(result)
                 self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {totalTime/i} seconds per frame.")
                 await itemFuture.set_data(item.output_names[0], children)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")
+                self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(fnf_error)
             except IOError as io_error:
                 self.logger.error(f"IO error (video might be corrupted): {io_error}")
+                self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(io_error)
             except Exception as e:
                 self.logger.error(f"An unexpected error occurred: {e}")
+                self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(e)

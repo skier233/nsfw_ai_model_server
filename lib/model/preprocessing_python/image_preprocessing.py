@@ -3,11 +3,27 @@ import torch
 from torchvision.transforms import v2 as transforms
 from torchvision.transforms.functional import InterpolationMode
 from torchvision.io import read_image
+import torchvision
 
 decord.bridge.set_bridge('torch')
 
 def custom_round(x, base=1):
     return base * round(x/base)
+
+#TODO: SEE WHICH IS BETTER
+def get_video_duration_torchvision(video_path):
+    video = torchvision.io.VideoReader(video_path, "video")
+    metadata = video.get_metadata()
+    duration = metadata['video']['duration'][0]
+    return duration
+
+def get_video_duration_decord(video_path):
+    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+    num_frames = len(vr)
+    frame_rate = vr.get_avg_fps()
+    duration = num_frames / frame_rate
+    return duration
+
 
 def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None):
     if device:
@@ -30,6 +46,8 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
         ])
     return imageTransforms(read_image(image_path).to(device))
 
+#TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
+#TODO: Make all preprocessing code open source and configurable
 def preprocess_video_vr(video_path, frame_interval=0.5, img_size=512, use_half_precision=True, device=None, use_timestamps=False):
     if device:
         device = torch.device(device)

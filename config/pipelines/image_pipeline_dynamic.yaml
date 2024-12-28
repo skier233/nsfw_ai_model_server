@@ -1,0 +1,21 @@
+inputs:
+  - image_path
+  - threshold
+  - return_confidence
+output: result
+short_name: dynamic_image
+version: 1.0
+
+models:
+  - name: dynamic_image_ai
+    inputs:
+      - image_path
+      - threshold
+      - return_confidence
+    outputs:
+      - result_early
+  - name: image_result_postprocessor
+    inputs:
+      - result_early
+    outputs:
+      - result

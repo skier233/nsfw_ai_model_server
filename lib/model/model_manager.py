@@ -19,6 +19,14 @@ class ModelManager:
             self.models[modelName] = self.create_model(modelName)
         return self.models[modelName]
     
+    def get_and_refresh_model(self, modelName):
+        if modelName not in self.models:
+            self.models[modelName] = self.create_model(modelName)
+        else:
+            del self.models[modelName]
+            self.models[modelName] = self.create_model(modelName)
+        return self.models[modelName]
+    
     def create_model(self, modelName):
         if not isinstance(modelName, str):
             raise ValueError("Model names must be strings that are the name of the model config file!")
@@ -27,6 +35,7 @@ class ModelManager:
             model = self.model_factory(load_config(model_config_path))
         except Exception as e:
             self.logger.error(f"Error loading model {model_config_path}: {e}")
+            self.logger.debug("Stack trace:", exc_info=True)
             return None
         return model
     

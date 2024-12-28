@@ -9,7 +9,7 @@ class ModelWrapper:
         self.outputs = outputs
 
 class Pipeline:
-    def __init__(self, configValues, model_manager):
+    def __init__(self, configValues, model_manager, dynamic_ai_manager):
         if not validate_string_list(configValues["inputs"]):
             raise ValueError("Error: Pipeline inputs must be a non-empty list of strings!")
         if not configValues["output"]:
@@ -26,6 +26,7 @@ class Pipeline:
         self.inputs = configValues["inputs"]
         self.output = configValues["output"]
 
+
         self.models = []
         for model in configValues["models"]:
             if not validate_string_list(model["inputs"]):
@@ -33,8 +34,24 @@ class Pipeline:
             if not model["name"]:
                 raise ValueError("Error: Model name must be a non-empty string!")
             modelName = model["name"]
+            if modelName == "dynamic_video_ai":
+                dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"])
+                self.models.extend(dynamic_models)
+                continue
+            elif modelName == "dynamic_image_ai":
+                dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"])
+                self.models.extend(dynamic_models)
+                continue
             returned_model = model_manager.get_or_create_model(modelName)
             self.models.append(ModelWrapper(returned_model, model["inputs"], model["outputs"]))
+
+        categories_set = set()
+        for model in self.models:
+            if isinstance(model.model.model, AIModel):
+                for category in model.model.model.model_category:
+                    if category in categories_set:
+                        raise ValueError("Error: AI models must not have overlapping categories!")
+                    categories_set.add(category)
     
     async def event_handler(self, itemFuture, key):
         if key == self.output:
@@ -60,6 +77,13 @@ class Pipeline:
             if isinstance(model.model.model, AIModel):
                 return model.model.model
         return None
+    
+    def get_ai_models_info(self):
+        ai_version_and_ids = []
+        for model in self.models:
+            if isinstance(model.model.model, AIModel):
+                ai_version_and_ids.append((model.model.model.model_version, model.model.model.model_identifier, model.model.model.model_file_name, model.model.model.model_category))
+        return ai_version_and_ids
 
 def validate_string_list(input_list):
     if not isinstance(input_list, list):

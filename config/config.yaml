@@ -1,5 +1,5 @@
-active_pipelines: ["video_pipeline_vivid_galaxy", "image_pipeline_vivid_galaxy"]
-default_image_pipeline: "image_pipeline_vivid_galaxy"
-default_video_pipeline: "video_pipeline_vivid_galaxy"
+active_pipelines: ["image_pipeline_dynamic", "video_pipeline_dynamic"]
+default_image_pipeline: "image_pipeline_dynamic"
+default_video_pipeline: "video_pipeline_dynamic"
 loglevel: "INFO"
 port: 8000
