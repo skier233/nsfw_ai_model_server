@@ -89,10 +89,6 @@ class ModelProcessor():
             if skipped_categories is not None:
                 this_ai_categories = self.model.model_category
                 if all(this_category in skipped_categories for this_category in this_ai_categories):
-                    # We skip this AI model
-                    # for output in item.output_names:
-                    #     await item.item_future.set_data(output, Skip())
-                    # return
                     await self.complete_item(item)
                     return True
         batch_data.append(item)

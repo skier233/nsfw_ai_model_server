@@ -16,7 +16,7 @@ async def process_images(request: ImagePathList):
         image_paths = request.paths
         logger.info(f"Processing {len(image_paths)} images")
         pipeline_name = request.pipeline_name or server_manager.default_image_pipeline
-        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence], pipeline_name) for path in image_paths]
+        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
         results = await asyncio.gather(*futures, return_exceptions=True)
 
         for i, result in enumerate(results):

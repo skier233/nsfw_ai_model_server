@@ -3,9 +3,12 @@ from lib.config.config_utils import load_config
 from lib.model.ai_model import AIModel
 from lib.pipeline.pipeline import ModelWrapper
 from lib.migrations.migration_v20 import migrate_to_2_0
+from lib.server.exceptions import NoActiveModelsException
 
 
 ai_active_directory = "./config/active_ai.yaml"
+
+
 
 class DynamicAIManager:
     def __init__(self, model_manager):
@@ -21,6 +24,10 @@ class DynamicAIManager:
         if self.loaded:
             return
         models = []
+
+        if self.ai_model_names is None or len(self.ai_model_names) == 0:
+            self.logger.error("Error: No active AI models found in active_ai.yaml")
+            raise NoActiveModelsException("Error: No active AI models found in active_ai.yaml")
         for model_name in self.ai_model_names:
             models.append(self.model_manager.get_or_create_model(model_name))
         self.__verify_models(models)
@@ -70,7 +77,7 @@ class DynamicAIManager:
 
         # add the ai models
         for model in self.models:
-            model_wrappers.append(ModelWrapper(model, ["dynamic_image", inputs[1], inputs[2]], model.model.model_category))
+            model_wrappers.append(ModelWrapper(model, ["dynamic_image", inputs[1], inputs[2], inputs[3]], model.model.model_category))
 
         # coalesce all the ai results
         coalesce_inputs = []

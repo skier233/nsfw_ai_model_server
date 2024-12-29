@@ -5,7 +5,7 @@ from lib.config.config_utils import load_config
 from lib.pipeline.dynamic_ai_manager import DynamicAIManager
 from lib.pipeline.pipeline import Pipeline
 from lib.model.model_manager import ModelManager
-from lib.server.exceptions import ServerStopException
+from lib.server.exceptions import NoActiveModelsException, ServerStopException
 
 class PipelineManager:
     def __init__(self):
@@ -26,6 +26,8 @@ class PipelineManager:
                 self.pipelines[pipeline] = newpipeline
                 await newpipeline.start_model_processing()
                 self.logger.info(f"Pipeline {pipeline} V{newpipeline.version} loaded successfully!")
+            except NoActiveModelsException as e:
+                raise e
             except Exception as e:
                 del self.pipelines[pipeline]
                 self.logger.error(f"Error loading pipeline {pipeline}: {e}")

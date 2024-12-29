@@ -9,7 +9,7 @@ ai_models_directory = "./config/models"
 def load_active_ai_models():
     with open(active_ai_yaml_path, 'r') as f:
         data = yaml.safe_load(f)
-    return data.get('active_ai_models', [])
+    return data.get('active_ai_models', []) or []
 
 def save_active_ai_models(active_ai_models):
     with open(active_ai_yaml_path, 'w') as f:
@@ -44,7 +44,10 @@ def display_model(stdscr, y, x, model, highlight=False, incompatible=False, reas
     else:
         stdscr.addstr(y, x, display_text)
 
-def main(stdscr):
+def choose_active_models():
+    curses.wrapper(open_ui)
+
+def open_ui(stdscr):
     curses.curs_set(0)
     curses.start_color()
     curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_RED)
@@ -167,4 +170,4 @@ def main(stdscr):
     save_active_ai_models([model['yaml_file_name'] for model in active_ai_models])
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    choose_active_models()

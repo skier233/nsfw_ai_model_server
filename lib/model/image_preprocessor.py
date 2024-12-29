@@ -27,13 +27,13 @@ class ImagePreprocessorModel(Model):
                 preprocessed_frame = self.preprocess_image(input_data, self.image_size, self.use_half_precision, self.device)
                 await itemFuture.set_data(item.output_names[0], preprocessed_frame)
             except FileNotFoundError as fnf_error:
-                self.logger.error(f"File not found error: {fnf_error}")
+                self.logger.error(f"File not found error: {fnf_error} for file: {input_data}")
                 itemFuture.set_exception(fnf_error)
             except IOError as io_error:
-                self.logger.error(f"IO error (image might be corrupted): {io_error}")
+                self.logger.error(f"IO error (image might be corrupted): {io_error} for file: {input_data}")
                 self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(io_error)
             except Exception as e:
-                self.logger.error(f"An unexpected error occurred: {e}")
+                self.logger.error(f"An unexpected error occurred: {e} for file: {input_data}")
                 self.logger.debug("Stack trace:", exc_info=True)
                 itemFuture.set_exception(e)

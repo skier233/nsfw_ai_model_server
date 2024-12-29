@@ -2,6 +2,7 @@ inputs:
   - image_path
   - threshold
   - return_confidence
+  - skipped_categories
 output: result
 short_name: dynamic_image
 version: 1.0
@@ -12,6 +13,7 @@ models:
       - image_path
       - threshold
       - return_confidence
+      - skipped_categories
     outputs:
       - result_early
   - name: image_result_postprocessor
