@@ -1,12 +1,15 @@
 
 import asyncio
 import logging
+from lib.config.config_utils import load_config
 from lib.model.preprocessing_python.image_preprocessing import get_video_duration_decord
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
 from lib.model.skip_input import Skip
 logger = logging.getLogger("logger")
+
+post_processing_config = load_config("./config/post_processing/post_processing_config.yaml")
 
 async def result_coalescer(data):
     for item in data:
@@ -58,13 +61,22 @@ async def image_result_postprocessor(data):
                 continue
             toReturn[category] = []
             for tag in tags:
-                tagname, confidence = tag
-                if tagname not in category_config[category]:
-                    continue
-                tag_threshold = float(category_config[category][tagname]['TagThreshold'])
-                renamed_tag = category_config[category][tagname]['RenamedTag']
+                if isinstance(tag, tuple):
+                    tagname, confidence = tag
+                    if tagname not in category_config[category]:
+                        continue
+                    tag_threshold = float(category_config[category][tagname]['TagThreshold'])
+                    renamed_tag = category_config[category][tagname]['RenamedTag']
 
-                if confidence >= tag_threshold:
+                    if not post_processing_config["use_category_image_thresholds"]:
+                        toReturn[category].append((renamed_tag, confidence))
+                    elif confidence >= tag_threshold:
+                        toReturn[category].append((renamed_tag, confidence))
+                else:
+                    if tag not in category_config[category]:
+                        continue
+                    renamed_tag = category_config[category][tag]['RenamedTag']
                     toReturn[category].append(renamed_tag)
+
 
         await itemFuture.set_data(item.output_names[0], toReturn)
