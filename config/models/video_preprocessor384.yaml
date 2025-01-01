@@ -1,7 +1,0 @@
-type: video_preprocessor
-max_queue_size: null
-max_batch_size: 1
-instance_count: 1
-frame_interval: 2
-use_half_precision: true
-image_size: 384
