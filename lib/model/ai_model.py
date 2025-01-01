@@ -17,8 +17,17 @@ class AIModel(Model):
         self.model_return_confidence = configValues.get("model_return_confidence", False)
         self.device = configValues.get("device", None)
         self.fill_to_batch = configValues.get("fill_to_batch_size", True)
+        self.model_image_size = configValues.get("model_image_size", None)
+        self.model_category = configValues.get("model_category", None)
+        self.model_version = configValues.get("model_version", None)
+        self.model_identifier = configValues.get("model_identifier", None)
+        self.category_mappings = configValues.get("category_mappings", None)
+        self.normalization_config = configValues.get("normalization_config", 1)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
+        if self.model_category is not None and len(self.model_category) > 1:
+            if self.category_mappings is None:
+                raise ValueError("category_mappings is required for models with more than one category")
         self.model = None
         if self.device is None:
             self.localdevice = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,38 +46,53 @@ class AIModel(Model):
             self.max_batch_size = scaledBatchSize
             self.max_queue_size = scaledBatchSize
             self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name}")
-                
-    
 
     async def worker_function(self, data):
-        # Get the shape of the first image in the data
-        first_image_shape = data[0].item_future[data[0].input_names[0]].shape
+        try:
+            first_image_shape = data[0].item_future[data[0].input_names[0]].shape
+            # Create an empty tensor with the same shape as the input images
+            images = torch.empty((len(data), *first_image_shape), device=self.localdevice)
+            for i, item in enumerate(data):
+                itemFuture = item.item_future
+                images[i] = itemFuture[item.input_names[0]]
 
-        # Create an empty tensor with the same shape as the input images
-        images = torch.empty((len(data), *first_image_shape), device=self.localdevice)
-        for i, item in enumerate(data):
-            itemFuture = item.item_future
-            images[i] = itemFuture[item.input_names[0]]
+            curr = time.time()
+            results = self.model.process_images(images)
+            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name}")
 
-        curr = time.time()
-        results = self.model.process_images(images)
-        self.logger.debug(f"Processed {len(images)} images in {time.time() - curr}")
+            for i, item in enumerate(data):
+                item_future = item.item_future
+                threshold = item_future[item.input_names[1]] or self.model_threshold
+                return_confidence = self.model_return_confidence
+                if item_future[item.input_names[2]] is not None:
+                    return_confidence = item_future[item.input_names[2]]
+                
+                toReturn = {output_name: [] for output_name in item.output_names}
+                result = results[i]
+                
+                for j, confidence in enumerate(result):
+                    if threshold is not None:
+                        if confidence.item() > threshold:
+                            tag_name = self.tags[j]
+                            if return_confidence:
+                                tag = (tag_name, round(confidence.item(), 2))
+                            else:
+                                tag = tag_name
 
-        for i, item in enumerate(data):
-            item_future = item.item_future
-            threshold = item_future[item.input_names[1]] or self.model_threshold
-            return_confidence = self.model_return_confidence
-            if item_future[item.input_names[2]] is not None:
-                return_confidence = item_future[item.input_names[2]]
-            result = results[i]
-            if threshold is not None:
-                if return_confidence:
-                    result = [(self.tags[i], round(confidence.item(), 2)) for i, confidence in enumerate(result) if confidence.item() > threshold]
-                else:
-                    result = (result > threshold)
-                    if self.model_return_tags:
-                        result = [self.tags[i] for i, tag in enumerate(result) if tag.item()]
-            await item_future.set_data(item.output_names[0], result)
+                            if j in self.category_mappings:
+                                list_id = self.category_mappings[j]
+                                toReturn[item.output_names[list_id]].append(tag)
+                    else:
+                        list_id = self.category_mappings[j]
+                        toReturn[item.output_names[list_id]].append(tag)
+                for output_name, result_list in toReturn.items():
+                    await item_future.set_data(output_name, result_list)
+        except Exception as e:
+            self.logger.error(f"Error in ai model worker_function: {e}")
+            self.logger.debug(f"Error in {self.model_file_name} data: {data}")
+            self.logger.debug("Stack trace:", exc_info=True)
+            for item in data:
+                item.item_future.set_exception(e)
 
     async def load(self):
         if self.model is None:
@@ -79,6 +103,8 @@ class AIModel(Model):
                 from ai_processing import ModelRunner
                 self.model = ModelRunner(f"./models/{self.model_file_name}.pt.enc", f"./models/{self.model_license_name}.lic", self.max_model_batch_size, self.device)
             self.tags = get_index_to_tag_mapping(f"./models/{self.model_file_name}.tags.txt")
+            if self.model_category is not None and len(self.model_category) == 1 and self.category_mappings is None:
+                self.category_mappings = {i: 0 for i, _ in  enumerate(self.tags)}
         else:
             self.model.load_model()
 

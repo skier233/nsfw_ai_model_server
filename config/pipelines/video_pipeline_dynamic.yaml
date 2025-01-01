@@ -1,0 +1,35 @@
+inputs:
+  - video_path
+  - return_timestamps
+  - time_interval
+  - threshold
+  - return_confidence
+  - vr_video
+  - existing_video_data
+  - skipped_categories
+output: results
+short_name: dynamic_video
+version: 1.0
+
+models:
+# need to dynamically use the video processor for the right sized input
+  - name: dynamic_video_ai
+    inputs:
+      - video_path
+      - return_timestamps
+      - time_interval
+      - threshold
+      - return_confidence
+      - vr_video
+      - skipped_categories
+    outputs:
+      - childrenResults
+  - name: video_result_postprocessor
+    inputs:
+      - childrenResults
+      - video_path
+      - time_interval
+      - threshold
+      - existing_video_data
+    outputs:
+      - results

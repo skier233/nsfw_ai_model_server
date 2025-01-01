@@ -6,13 +6,9 @@ from pydantic import BaseModel
 
 class VideoResult(BaseModel):
     result: Any
-    pipeline_short_name: str
-    pipeline_version: float
 
 class ImageResult(BaseModel):
     result: Any
-    pipeline_short_name: str
-    pipeline_version: float
 
 API_BASE_URL = 'http://localhost:8000'
 
@@ -26,7 +22,7 @@ async def call_api_async(session, endpoint, payload):
 
 async def process_images_async(image_paths):
     async with aiohttp.ClientSession() as session:
-        return await call_api_async(session, 'process_images/', {"paths": image_paths, "threshold": 0.5})
+        return await call_api_async(session, 'process_images/', {"paths": image_paths, "threshold": 0.5, "return_confidence": True})
 
 async def process_videos_async(video_paths):
     async with aiohttp.ClientSession() as session:

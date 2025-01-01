@@ -8,9 +8,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import torch
 from lib.config.config_utils import load_config
+from lib.configurator.configure_active_ai import choose_active_models
 from lib.logging.logger import setup_logger
 from lib.pipeline.pipeline_manager import PipelineManager
-from lib.server.exceptions import ServerStopException
+from lib.server.exceptions import NoActiveModelsException, ServerStopException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import requests
@@ -62,7 +63,12 @@ class ServerManager:
         if not pipelines:
             self.logger.error("No pipelines found in the configuration file.")
             raise ServerStopException("No pipelines found in the configuration file.")
-        await self.pipeline_manager.load_pipelines(pipelines)
+        try:
+            await self.pipeline_manager.load_pipelines(pipelines)
+        except NoActiveModelsException as e:
+            self.logger.error(f"Error: No active AI models found in active_ai.yaml")
+            choose_active_models()
+            raise ServerStopException("No active AI models. Choose models in select_ai_models.ps1/sh and start the server again.")
         self.logger.info("Pipelines loaded successfully")
         self.background_task = asyncio.create_task(check_inactivity())
 

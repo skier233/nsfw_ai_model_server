@@ -1,4 +1,10 @@
 import asyncio
+import logging
+
+from lib.model.ai_model import AIModel
+from lib.model.skip_input import Skip
+
+logger = logging.getLogger("logger")
 
 class ItemFuture:
     def __init__(self, parent, event_handler):
@@ -55,6 +61,7 @@ class ModelProcessor():
         self.max_batch_waits = self.model.max_batch_waits
         self.workers_started = False
         self.failed_loading = False
+        self.is_ai_model = isinstance(self.model, AIModel)
 
     def update_values_from_child_model(self):
         self.instance_count = self.model.instance_count
@@ -72,28 +79,45 @@ class ModelProcessor():
         for item in data:
             await self.queue.put(item)
 
+    async def complete_item(self, item):
+        for output in item.output_names:
+            await item.item_future.set_data(output, Skip())
+
+    async def batch_data_append_with_skips(self, batch_data, item):
+        if self.is_ai_model:
+            skipped_categories = item.item_future[item.input_names[3]]
+            if skipped_categories is not None:
+                this_ai_categories = self.model.model_category
+                if all(this_category in skipped_categories for this_category in this_ai_categories):
+                    await self.complete_item(item)
+                    return True
+        batch_data.append(item)
+        return False
+
     async def worker_process(self):
         while True:
             firstItem = await self.queue.get()
             batch_data = []
-            batch_data.append(firstItem)
+            if (await self.batch_data_append_with_skips(batch_data, firstItem)):
+                continue
 
             waitsSoFar = 0
 
             while len(batch_data) < self.max_batch_size:
                 if not self.queue.empty():
-                    batch_data.append(await self.queue.get())
+                    await self.batch_data_append_with_skips(batch_data, await self.queue.get())
                 elif waitsSoFar < self.max_batch_waits:
                     waitsSoFar += 1
                     await asyncio.sleep(1)
                 else:
                     break
-
-            try :
-                await self.model.worker_function_wrapper(batch_data)
-            finally:
-                for _ in batch_data:
-                    self.queue.task_done()
+            
+            if len(batch_data) > 0:
+                try :
+                    await self.model.worker_function_wrapper(batch_data)
+                finally:
+                    for _ in batch_data:
+                        self.queue.task_done()
 
     async def start_workers(self):
         if self.workers_started:
