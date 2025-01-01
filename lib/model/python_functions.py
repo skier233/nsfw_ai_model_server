@@ -7,9 +7,8 @@ from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
 from lib.model.skip_input import Skip
+from lib.model.postprocessing.post_processing_settings import post_processing_config
 logger = logging.getLogger("logger")
-
-post_processing_config = load_config("./config/post_processing/post_processing_config.yaml")
 
 async def result_coalescer(data):
     for item in data:

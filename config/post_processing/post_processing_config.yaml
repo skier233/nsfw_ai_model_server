@@ -1,1 +1,6 @@
 use_category_image_thresholds: true
+reprocess_with_more_accurate_same_model: false
+timespan_generation_systems:
+    Clustering:
+        defaults: [0.04, 0.85, 0.25, 0.0]
+        sweep: [[0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.2], [0.7, 0.8, 0.93, 0.85, 0.87, 0.9, 0.95, 1.0], [0.00, 0.1, 0.15, 0.17, 0.2, 0.225, 0.25, 0.275, 0.3, 0.4], [0.0, 1.0, 2.0, 4.0, 6.0]]

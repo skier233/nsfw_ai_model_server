@@ -1,12 +1,13 @@
 import asyncio
+import json
 import logging
-from typing import Optional
 from fastapi import HTTPException
-from lib.model.postprocessing import timeframe_processing
+from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 from lib.model.preprocessing.input_logic import process_video_preprocess
-from lib.server.api_definitions import ImagePathList, VideoPathList, ImageResult, VideoResult
+from lib.server.api_definitions import ImagePathList, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoResult
 from lib.server.server_manager import server_manager, app
+from lib.model.postprocessing.category_settings import category_config
 
 logger = logging.getLogger("logger")
 
@@ -68,6 +69,34 @@ async def process_video(request: VideoPathList):
         return_result = VideoResult(result=result)
         logger.debug(f"Returning Video Result: {return_result}")
         return return_result
+    except Exception as e:
+        logger.error(f"Error processing video: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.post("/optimize_timeframe_settings/")
+async def optimize_timeframe_settings(request: OptimizeMarkerSettings):
+    try:
+        video_result, _ = AIVideoResult.from_client_json(json=request.existing_json_data)
+
+        if video_result is None:
+            raise HTTPException(status_code=400, detail="Video Result is None")
+        else:
+            desired_timespan_data = request.desired_timespan_data
+            desired_timespan_category_dict = {}
+            renamedtag_category_dict = {}
+            for category, category_dict in category_config.items():
+                for tag, renamed_tag in category_dict.items():
+                    renamedtag_category_dict[renamed_tag["RenamedTag"]] = category
+            
+            for tag, time_frames in desired_timespan_data.items():
+                category = renamedtag_category_dict.get(tag, "Unknown")
+                if category not in desired_timespan_category_dict:
+                    desired_timespan_category_dict[category] = {}
+                time_frames_new = [tag_models.TimeFrame(**(json.loads(time_frame)), totalConfidence=None) for time_frame in time_frames]
+                desired_timespan_category_dict[category][tag] = time_frames_new
+            timeframe_processing.determine_optimal_timespan_settings(video_result, desired_timespan_data=desired_timespan_category_dict)
+        return 
     except Exception as e:
         logger.error(f"Error processing video: {e}")
         logger.debug("Stack trace:", exc_info=True)

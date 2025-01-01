@@ -17,6 +17,7 @@ class DynamicAIManager:
         self.ai_model_names = self.configfile.get("active_ai_models", [])
         self.loaded = False
         self.image_size = None
+        self.normalization_config = None
         self.models = []
         self.logger = logging.getLogger("logger")
 
@@ -39,6 +40,7 @@ class DynamicAIManager:
         model_wrappers = []
         video_preprocessor = self.model_manager.get_or_create_model("video_preprocessor_dynamic")
         video_preprocessor.model.image_size = self.image_size
+        video_preprocessor.model.normalization_config = self.normalization_config
 
         # add a preprocessor
         model_wrappers.append(ModelWrapper(video_preprocessor, inputs, ["dynamic_children", "dynamic_frame", "frame_index", "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"]))
@@ -71,6 +73,7 @@ class DynamicAIManager:
         model_wrappers = []
         image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
         image_preprocessor.model.image_size = self.image_size
+        image_preprocessor.model.normalization_config = self.normalization_config
 
         # add a preprocessor
         model_wrappers.append(ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image"]))
@@ -94,6 +97,7 @@ class DynamicAIManager:
     
     def __verify_models(self, models, second_pass=False):
         current_image_size = None
+        current_norm_config = None
         for model in models:
             inner_model = model.model
             if not isinstance(inner_model, AIModel):
@@ -116,11 +120,18 @@ class DynamicAIManager:
                     models.append(self.model_manager.get_and_refresh_model(model_name))
                 self.__verify_models(models, True)
                 return
+            
             if current_image_size is None:
                 current_image_size = inner_model.model_image_size
             elif current_image_size != inner_model.model_image_size:
                 raise ValueError(f"Error: Dynamic AI models must all have the same model_image_size! {inner_model} has a different model_image_size than other models!")
+            
+            if current_norm_config is None:
+                current_norm_config = inner_model.normalization_config
+            elif current_norm_config != inner_model.normalization_config:
+                raise ValueError(f"Error: Dynamic AI models must all have the same normalization_config! {inner_model} has a different normalization_config than other models!")
         self.image_size = current_image_size
+        self.normalization_config = current_norm_config
         self.logger.debug("Finished verifying dynamic AI models")
 
         

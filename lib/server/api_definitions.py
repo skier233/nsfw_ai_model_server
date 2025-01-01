@@ -1,5 +1,7 @@
-from typing import Any, List
+from typing import Any, Dict, List
 from pydantic import BaseModel
+
+from lib.model.postprocessing import tag_models
 
 class ImagePathList(BaseModel):
     paths: List[str]
@@ -16,6 +18,10 @@ class VideoPathList(BaseModel):
     return_confidence: bool = None
     vr_video: bool = False
     existing_json_data: Any = None
+
+class OptimizeMarkerSettings(BaseModel):
+    existing_json_data: Any = None
+    desired_timespan_data: Any = None
 
 class VideoResult(BaseModel):
     result: Any

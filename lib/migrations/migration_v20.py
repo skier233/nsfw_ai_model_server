@@ -5,8 +5,8 @@ model_directory = "./config/models"
 model_fields_to_add = {
     "gentler_river": {"model_category": ["actions"], "model_version": 2.0, "model_image_size": 512, "model_info": "Most Accurate", "model_identifier": 200},
     "gentler_river_full": {"model_category": ["actions"], "model_version": 2.0, "model_image_size": 512, "model_info": "(CPU Variant if no Nvidia GPU available) Most Accurate", "model_identifier": 900},
-    "vivid_galaxy": {"model_category": ["actions"], "model_version": 1.9, "model_image_size": 512, "model_info": "Free Variant", "model_identifier": 950},
-    "vivid_galaxy_full": {"model_category": ["actions"], "model_version": 1.9, "model_image_size": 512, "model_info": "(CPU Variant if no Nvidia GPU available) Free Variant", "model_identifier": 970},
+    "vivid_galaxy": {"model_category": ["actions"], "model_version": 1.9, "model_image_size": 512, "model_info": "Free Variant", "model_identifier": 950, "normalization_config": 0},
+    "vivid_galaxy_full": {"model_category": ["actions"], "model_version": 1.9, "model_image_size": 512, "model_info": "(CPU Variant if no Nvidia GPU available) Free Variant", "model_identifier": 970, "normalization_config": 0},
     "distinctive_haze": {"model_category": ["actions"], "model_version": 2.0, "model_image_size": 384, "model_info": "Faster but slightly less accurate", "model_identifier": 400},
     "iconic_sky": {"model_category": ["bodyparts"], "model_version": 0.5, "model_image_size": 512, "model_info": "Most Accurate", "model_identifier": 200},
     "true_lake": {"model_category": ["bdsm"], "model_version": 0.7, "model_image_size": 512, "model_info": "Most Accurate", "model_identifier": 200},

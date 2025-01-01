@@ -22,6 +22,7 @@ class AIModel(Model):
         self.model_version = configValues.get("model_version", None)
         self.model_identifier = configValues.get("model_identifier", None)
         self.category_mappings = configValues.get("category_mappings", None)
+        self.normalization_config = configValues.get("normalization_config", 1)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
         if self.model_category is not None and len(self.model_category) > 1:

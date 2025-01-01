@@ -1,8 +1,5 @@
-
-
 import logging
-from lib.model.postprocessing.AI_VideoResult import AIVideoResult
-from lib.server.api_definitions import VideoPathList
+from lib.model.postprocessing.post_processing_settings import post_processing_config
 logger = logging.getLogger("logger")
 
 def process_video_preprocess(video_result, frame_interval, threshold, pipeline):
@@ -18,8 +15,10 @@ def process_video_preprocess(video_result, frame_interval, threshold, pipeline):
             else:
                 previousUsedModel = previouslyUsedModelsDict[category]
 
-                #TODO: add configuration option to let people choose whether to reprocess or not for a more accurate version of the same model
-                if previousUsedModel.needs_reprocessed(frame_interval, threshold, ai_version, ai_id, ai_filename) == 2:
+                needs_reprocessed = previousUsedModel.needs_reprocessed(frame_interval, threshold, ai_version, ai_id, ai_filename)
+                if post_processing_config.get('reprocess_with_more_accurate_same_model', False) and needs_reprocessed == 1:
+                    ai_workNeeded = True
+                elif  needs_reprocessed == 2:
                     ai_workNeeded = True
                 else:
                     skipped_model_categories.add(category)
