@@ -1,5 +1,10 @@
 use_category_image_thresholds: true
 reprocess_with_more_accurate_same_model: false
+csv_defaults:
+    MinMarkerDuration: 12
+    MaxGap: 6
+    RequiredDuration: 20
+    TagThreshold: 0.5
 timespan_generation_systems:
     Clustering:
         defaults: [0.04, 0.85, 0.25, 0.0]

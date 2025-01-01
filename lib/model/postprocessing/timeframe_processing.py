@@ -3,7 +3,7 @@ import logging
 import math
 from lib.model.postprocessing.category_settings import category_config
 import lib.model.postprocessing.tag_models as tag_models
-from lib.model.postprocessing.post_processing_settings import post_processing_config
+from lib.model.postprocessing.post_processing_settings import get_or_default, post_processing_config
 
 logger = logging.getLogger("logger")
 
@@ -25,12 +25,13 @@ def compute_video_timespans_OG(video_result):
             if tag not in category_config[category]:
                 #logger.debug(f"Tag {tag} not found in category settings for category {category}")
                 continue
-            tag_min_duration = format_duration_or_percent(category_config[category][tag]['MinMarkerDuration'], video_duration)
+            
+            tag_min_duration = format_duration_or_percent(get_or_default(category_config[category][tag], 'MinMarkerDuration', 12), video_duration)
             if tag_min_duration <= 0:
                 #logger.debug(f"Tag {tag} has a min duration of less than 0, skipping")
                 continue
-            tag_threshold = float(category_config[category][tag]['TagThreshold'])
-            tag_max_gap = format_duration_or_percent(category_config[category][tag]['MaxGap'], video_duration)
+            tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
+            tag_max_gap = format_duration_or_percent(get_or_default(category_config[category][tag], 'MaxGap', 6), video_duration)
             renamed_tag = category_config[category][tag]['RenamedTag']
 
             tag_timeframes = []
@@ -77,10 +78,10 @@ def compute_video_timespans_clustering(video_result, density_weight, gap_factor,
                 #logger.debug(f"Tag {tag} not found in category config for {category}")
                 continue
             
-            tag_threshold = float(category_config[category][tag]['TagThreshold'])
+            #tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
             renamed_tag = category_config[category][tag]['RenamedTag']
             tag_min_duration = format_duration_or_percent(
-                category_config[category][tag]['MinMarkerDuration'],
+                get_or_default(category_config[category][tag], 'MinMarkerDuration', 12),
                 video_duration
             )
             if tag_min_duration <= 0:
@@ -186,9 +187,9 @@ def compute_video_timespans_proportional_merge(video_result, prop=0.5):
                 #logger.debug(f"Tag {tag} not found in category settings for category {category}")
                 continue
             
-            tag_threshold = float(category_config[category][tag]['TagThreshold'])
-            tag_max_gap = format_duration_or_percent(category_config[category][tag]['MaxGap'], video_duration)
-            tag_min_duration = format_duration_or_percent(category_config[category][tag]['MinMarkerDuration'], video_duration)
+            tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
+            tag_max_gap = format_duration_or_percent(get_or_default(category_config[category][tag], 'MaxGap', 6), video_duration)
+            tag_min_duration = format_duration_or_percent(get_or_default(category_config[category][tag], 'MinMarkerDuration', 12), video_duration)
             renamed_tag = category_config[category][tag]['RenamedTag']
 
             if tag_min_duration <= 0:
@@ -408,8 +409,9 @@ def compute_video_tags_OG(video_result):
             if tag not in category_config[category]:
                 logger.debug(f"Tag {tag} not found in category settings for category {category}")
                 continue
-            required_duration = format_duration_or_percent(category_config[category][tag]['RequiredDuration'], video_duration)
-            tag_threshold = float(category_config[category][tag]['TagThreshold'])
+            
+            required_duration = format_duration_or_percent(get_or_default(category_config[category][tag], 'RequiredDuration', 20), video_duration)
+            tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
             totalDuration = 0.0
             for raw_timespan in raw_timespans:
                 if raw_timespan.confidence < tag_threshold:
