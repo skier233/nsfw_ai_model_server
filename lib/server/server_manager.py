@@ -67,7 +67,10 @@ class ServerManager:
             await self.pipeline_manager.load_pipelines(pipelines)
         except NoActiveModelsException as e:
             self.logger.error(f"Error: No active AI models found in active_ai.yaml")
-            choose_active_models()
+            try:
+                choose_active_models()
+            except Exception as e:
+                self.logger.debug(f"Error: {e}")
             raise ServerStopException("No active AI models. Choose models in select_ai_models.ps1/sh and start the server again.")
         self.logger.info("Pipelines loaded successfully")
         self.background_task = asyncio.create_task(check_inactivity())
