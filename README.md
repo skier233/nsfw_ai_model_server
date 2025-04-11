@@ -21,7 +21,7 @@ The AI models available here are state-of-the-art, boasting far higher accuracy 
 ## Available Tags
 The main difference between the free model and the patreon models is the number of supported tags. See the supported tags of the free and Patreon models below along with a rough plan for future tags that will be added in the future:
 
-Current total supported tags: **105**
+Current total supported tags: **123**
 - [List of Currently Supported Tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing)
 - [*Rough Draft* List of Future Tags](https://docs.google.com/spreadsheets/d/13dFiZDMqpoaeOWo-M4LBweOAwkcmetgzYHMdqGIK328/edit?usp=sharing)
 
@@ -41,7 +41,7 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 ## Free Open Source vs Paid Models
 
-This project includes both a free open source AI model as well as several paid Patreon only models. The free AI model supports [10 tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) compared to the [36 currently supported tags--105 overall](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) in the Patreon variant. The paid version also includes different model variations that have different tradeoffs between accuracy and speed as well as more AI models for additional tag categories. You can see the list of currently available models here:
+This project includes both a free open source AI model as well as several paid Patreon only models. The free AI model supports [10 tags](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) compared to the [123 overall](https://docs.google.com/spreadsheets/d/1MbULbXaUMjvuGo066SuPaJVjBSSA57jhS3DAtvWNpwI/edit?usp=sharing) in the Patreon models. The paid version also includes different model variations that have different tradeoffs between accuracy and speed as well as more AI models for additional tag categories. You can see the list of currently available models here:
 
 [AI Model List](https://github.com/skier233/nsfw_ai_model_server/wiki/AI-Models)
 
