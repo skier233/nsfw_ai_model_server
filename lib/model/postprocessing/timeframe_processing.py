@@ -19,6 +19,7 @@ def compute_video_timespans_OG(video_result):
         if category not in category_config:
             logger.debug(f"Category {category} not found in category settings")
             continue
+        
         frame_interval = float(video_result.metadata.models[category].frame_interval)
         toReturn[category] = {}
         for tag, raw_timespans in tag_raw_timespans.items():
@@ -78,7 +79,7 @@ def compute_video_timespans_clustering(video_result, density_weight, gap_factor,
                 #logger.debug(f"Tag {tag} not found in category config for {category}")
                 continue
             
-            #tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
+            tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
             renamed_tag = category_config[category][tag]['RenamedTag']
             tag_min_duration = format_duration_or_percent(
                 get_or_default(category_config[category][tag], 'MinMarkerDuration', 12),
@@ -93,8 +94,8 @@ def compute_video_timespans_clustering(video_result, density_weight, gap_factor,
             current_bucket = None
             for i, raw_timespan in enumerate(raw_timespans):
                 confidence = raw_timespan.confidence
-                #if confidence < tag_threshold:
-                #    continue
+                if confidence < tag_threshold:
+                    continue
 
                 start = raw_timespan.start
                 end = raw_timespan.end or raw_timespan.start
@@ -414,7 +415,7 @@ def compute_video_tags_OG(video_result):
             tag_threshold = float(get_or_default(category_config[category][tag], 'TagThreshold', 0.5))
             totalDuration = 0.0
             for raw_timespan in raw_timespans:
-                if raw_timespan.confidence < tag_threshold:
+                if raw_timespan.confidence and raw_timespan.confidence < tag_threshold:
                     continue
                 if raw_timespan.end is None:
                     totalDuration += frame_interval
@@ -428,14 +429,19 @@ def compute_video_tags_OG(video_result):
 
 
 def format_duration_or_percent(value, video_duration):
-    if isinstance(value, float):
-        return value
-    elif isinstance(value, str):
-        if value.endswith('%'):
-            return float(value[:-1]) / 100 * video_duration
-        elif value.endswith('s'):
-            return float(value[:-1])
-        else:
+    try:
+        if isinstance(value, float):
+            return value
+        elif isinstance(value, str):
+            if value.endswith('%'):
+                return float(value[:-1]) / 100 * video_duration
+            elif value.endswith('s'):
+                return float(value[:-1])
+            else:
+                return float(value)
+        elif isinstance(value, int):
             return float(value)
-    elif isinstance(value, int):
-        return float(value)
+    except Exception as e:
+        logger.error(f"Error in format_duration_or_percent: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        return 0.0

@@ -8,7 +8,7 @@ logger = logging.getLogger("logger")
 class TagTimeFrame(BaseModel):
     start: float
     end: Optional[float] = None
-    confidence: float
+    confidence: Optional[float] = None
     def __str__(self):
         return f"TagTimeFrame(start={self.start}, end={self.end}, confidence={self.confidence})"
 
@@ -134,7 +134,11 @@ class AIVideoResult(BaseModel):
                         toReturn[key] = currentCategoryDict
                     
                     for item in value:
-                        tag_name, confidence = item
+                        if isinstance(item, tuple):
+                            tag_name, confidence = item
+                        else:
+                            tag_name = item
+                            confidence = None
 
                         if tag_name not in currentCategoryDict:
                             currentCategoryDict[tag_name] = [TagTimeFrame(start=frame_index, end=None, confidence=confidence)]

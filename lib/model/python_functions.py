@@ -7,7 +7,7 @@ from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
 from lib.model.skip_input import Skip
-from lib.model.postprocessing.post_processing_settings import post_processing_config
+from lib.model.postprocessing.post_processing_settings import get_or_default, post_processing_config
 logger = logging.getLogger("logger")
 
 async def result_coalescer(data):
@@ -64,7 +64,8 @@ async def image_result_postprocessor(data):
                     tagname, confidence = tag
                     if tagname not in category_config[category]:
                         continue
-                    tag_threshold = float(category_config[category][tagname]['TagThreshold'])
+                    
+                    tag_threshold = float(get_or_default(category_config[category][tagname], 'TagThreshold', 0.5))
                     renamed_tag = category_config[category][tagname]['RenamedTag']
 
                     if not post_processing_config["use_category_image_thresholds"]:
