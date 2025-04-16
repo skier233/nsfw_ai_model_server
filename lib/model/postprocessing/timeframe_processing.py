@@ -422,7 +422,7 @@ def compute_video_tags_OG(video_result):
                 else:
                     totalDuration += raw_timespan.end - raw_timespan.start + frame_interval
             tag_totals[category][tag] = totalDuration
-            if totalDuration >= required_duration:
+            if required_duration > 0 and totalDuration >= required_duration:
                 video_tags[category].add(category_config[category][tag]['RenamedTag'])
     return video_tags, tag_totals
 
