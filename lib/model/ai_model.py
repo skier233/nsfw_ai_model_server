@@ -30,9 +30,15 @@ class AIModel(Model):
                 raise ValueError("category_mappings is required for models with more than one category")
         self.model = None
         if self.device is None:
-            self.localdevice = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.localdevice = torch.device(self.device)
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.localdevice = torch.device(self.device)
+        
+        if self.device == "cpu":
+            self.batch_size_per_VRAM_GB = None
+            self.max_queue_size = None
+            self.max_batch_size = 1
+            self.max_model_batch_size = 1
+
 
         self.update_batch_with_mutli_models(1)
     
