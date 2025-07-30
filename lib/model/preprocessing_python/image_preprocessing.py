@@ -73,6 +73,7 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
     if device:
         device = torch.device(device)
     else:
+        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mean, std = get_normalization_config(norm_config, device)
     if (use_half_precision):
@@ -95,6 +96,7 @@ def preprocess_video(video_path, frame_interval=0.5, img_size=512, use_half_prec
     if device:
         device = torch.device(device)
     else:
+        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mean, std = get_normalization_config(norm_config, device)
     frame_transforms = get_frame_transforms(use_half_precision, mean, std, vr_video, img_size)
