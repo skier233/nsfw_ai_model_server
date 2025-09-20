@@ -1,6 +1,5 @@
-
-import gc
 import torch
+from lib.utils.memory_utils import clear_gpu_cache
 
 class PythonModel:
     def __init__(self, path, batch_size, device, fill_batch_size):
@@ -67,13 +66,7 @@ class PythonModel:
 
     def unload_model(self):
         self.model = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif torch.xpu.is_available():
-            torch.xpu.empty_cache()
-        elif torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-        gc.collect()
+        clear_gpu_cache()
         self.model_loaded = False
 
     @property
@@ -98,10 +91,4 @@ class PythonModel:
         Context management method to close the TensorBoard writer upon exiting the 'with' block.
         """
         del self.model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif torch.xpu.is_available():
-            torch.xpu.empty_cache()
-        elif torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-        gc.collect()
+        clear_gpu_cache()

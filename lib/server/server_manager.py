@@ -1,6 +1,5 @@
 import asyncio
 from contextlib import asynccontextmanager
-import gc
 import logging
 import os
 import signal
@@ -12,6 +11,7 @@ from lib.configurator.configure_active_ai import choose_active_models
 from lib.logging.logger import setup_logger
 from lib.pipeline.pipeline_manager import PipelineManager
 from lib.server.exceptions import NoActiveModelsException, ServerStopException
+from lib.utils.memory_utils import clear_gpu_cache
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import requests
@@ -128,13 +128,7 @@ async def check_inactivity():
             last_request_timestamp = middleware.last_request_timestamp
             # no requests in the last 10 minutes
             print("No requests in the last 5 minutes, Clearing cached memory")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif torch.mps.is_available():
-                torch.mps.empty_cache()
-            elif torch.xpu.is_available():
-                torch.xpu.empty_cache()
-            gc.collect()
+            clear_gpu_cache()
 
 origins = [
     "*",  # Replace with the actual origins you need
