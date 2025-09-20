@@ -1,0 +1,28 @@
+# Base Image
+FROM intel/intel-extension-for-pytorch:2.8.10-xpu-pip-base
+
+# FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+
+# Environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies (only essential ones)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git ca-certificates software-properties-common \
+    libglib2.0-0 libxext6 libsm6 libxrender1 ffmpeg vainfo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install your app wheel
+COPY dist/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl /tmp/
+RUN pip install /tmp/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl
+
+# Install other Python dependencies
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+WORKDIR /app
+EXPOSE 8000
+
+CMD ["python3", "server.py"]
+
