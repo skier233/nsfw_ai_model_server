@@ -1,0 +1,9 @@
+name: ai_model_server
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - ./dist/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl  # [lin]
+    - -r requirements-intel.txt

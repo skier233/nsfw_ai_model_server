@@ -132,6 +132,8 @@ async def check_inactivity():
                 torch.cuda.empty_cache()
             elif torch.mps.is_available():
                 torch.mps.empty_cache()
+            elif torch.xpu.is_available():
+                torch.xpu.empty_cache()
             gc.collect()
 
 origins = [
