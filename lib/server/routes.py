@@ -67,7 +67,7 @@ async def process_video(request: VideoPathList):
             raise HTTPException(status_code=400, detail=str(e))
         
         return_result = VideoResult(result=result)
-        logger.debug(f"Returning Video Result: {return_result}")
+        logger.debug(f"Returning Video Result for: '{request.path}' Results: {return_result}")
         return return_result
     except Exception as e:
         logger.error(f"Error processing video: {e}")

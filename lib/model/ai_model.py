@@ -5,12 +5,23 @@ from lib.model.model import Model
 from lib.model.ai_model_python.python_model import PythonModel
 import time
 
+model_to_detection_type = {
+    "gentler_river": "actions",
+    "gentler_river_full": "actions",
+    "vivid_galaxy": "actions",
+    "vivid_galaxy_full": "actions",
+    "distinctive_haze": "actions",
+    "iconic_sky": "bodyparts",
+    "true_lake": "bdsm",
+}
+
 class AIModel(Model):
     def __init__(self, configValues):
         Model.__init__(self, configValues)
         self.max_model_batch_size = configValues.get("max_model_batch_size", 12)
         self.batch_size_per_VRAM_GB = configValues.get("batch_size_per_VRAM_GB", None)
         self.model_file_name = configValues.get("model_file_name", None)
+        self.model_detection_type = model_to_detection_type.get(self.model_file_name, None)
         self.model_license_name = configValues.get("model_license_name", None)
         self.model_threshold = configValues.get("model_threshold", None)
         self.model_return_tags = configValues.get("model_return_tags", False)
@@ -62,7 +73,7 @@ class AIModel(Model):
             self.max_model_batch_size = scaledBatchSize
             self.max_batch_size = scaledBatchSize
             self.max_queue_size = scaledBatchSize
-            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name}")
+            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name} ({self.model_detection_type})")
 
     async def worker_function(self, data):
         try:
@@ -75,7 +86,7 @@ class AIModel(Model):
 
             curr = time.time()
             results = self.model.process_images(images)
-            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name}")
+            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name} ({self.model_detection_type})")
 
             for i, item in enumerate(data):
                 item_future = item.item_future
