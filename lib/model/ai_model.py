@@ -1,9 +1,10 @@
 
 import logging
+import time
 import torch
 from lib.model.model import Model
 from lib.model.ai_model_python.python_model import PythonModel
-import time
+from lib.utils.torch_device_selector import get_device_string
 
 class AIModel(Model):
     def __init__(self, configValues):
@@ -30,14 +31,7 @@ class AIModel(Model):
                 raise ValueError("category_mappings is required for models with more than one category")
         self.model = None
         if self.device is None:
-            if torch.cuda.is_available():
-                self.device = "cuda"
-            elif torch.xpu.is_available():
-                self.device = "xpu"
-            elif torch.backends.mps.is_available():
-                self.device = "mps"
-            else:
-                self.device = "cpu"
+            self.device = get_device_string()
         self.localdevice = torch.device(self.device)
         self.logger.debug(f"Using device: {self.device}")
     

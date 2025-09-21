@@ -1,21 +1,13 @@
 import torch
 from lib.utils.memory_utils import clear_gpu_cache
+from lib.utils.torch_device_selector import get_torch_device
 
 class PythonModel:
     def __init__(self, path, batch_size, device, fill_batch_size):
         self.model_path = path
         self.max_batch_size = batch_size
         self.fill_batch_size = fill_batch_size
-        if device:
-            self.device = torch.device(device)
-        elif torch.cuda.is_available():
-            self.device = torch.device('cuda')
-        elif torch.xpu.is_available(): 
-            self.device = torch.device('xpu')
-        elif torch.backed.mps.is_available():
-            self.device = torch.device('mps')
-        else:
-            self.device = torch.device('cpu')
+        self.device = get_torch_device(device)
         self._model_loaded = False
         self.load_model()
 
