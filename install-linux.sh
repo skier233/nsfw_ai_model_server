@@ -8,9 +8,22 @@ if [ "$1" = '--amd' ]; then
     # Create Env with special libs
     conda env create -f environment-linux-amd.yml
     source ./install-amd-post.sh
+    # Build AMD Docker image (uses base Dockerfile)
+    echo "Building AMD Docker image..."
+    docker build -t ai-model-server-amd .
+elif [ "$1" = '--intel' ]; then
+    echo "Intel-Mode activated!"
+    # Create Env with Intel-specific libs
+    # Build Intel Docker image (uses Intel-specific Dockerfile)
+    echo "Building Intel Docker image..."
+    docker build -f Dockerfile-intel -t ai-model-server-intel .
 else
     conda env create -f environment-linux.yml
     conda activate ai_model_server
+    # Build default Docker image
+    echo "Building default Docker image..."
+    docker build -t ai-model-server .
 fi
+echo "Docker image built as ai-model-server`
 python migrate.py
 python server.py

@@ -1,16 +1,13 @@
-
-import gc
 import torch
+from lib.utils.memory_utils import clear_gpu_cache
+from lib.utils.torch_device_selector import get_torch_device
 
 class PythonModel:
     def __init__(self, path, batch_size, device, fill_batch_size):
         self.model_path = path
         self.max_batch_size = batch_size
         self.fill_batch_size = fill_batch_size
-        if device:
-            self.device = torch.device(device)
-        else:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        self.device = get_torch_device(device)
         self._model_loaded = False
         self.load_model()
 
@@ -24,11 +21,14 @@ class PythonModel:
                 padding_size = self.max_batch_size - original_batch_size
                 padding = torch.zeros((padding_size, *preprocessed_images.shape[1:]), device=self.device)
                 preprocessed_images = torch.cat([preprocessed_images, padding], dim=0)
-        if self.device.type == 'cuda' and preprocessed_images.dtype != torch.float16:
+        if self.device.type in ['cuda', 'xpu'] and preprocessed_images.dtype != torch.float16:
             preprocessed_images = preprocessed_images.half()  # Convert to half precision
         with torch.no_grad():
             if self.device.type == 'cuda':
                 with torch.autocast("cuda", enabled=True):
+                    output = self.model(preprocessed_images)
+            elif self.device.type == 'xpu':
+                with torch.autocast("xpu", enabled=True):
                     output = self.model(preprocessed_images)
             else:
                 output = self.model(preprocessed_images)
@@ -58,11 +58,7 @@ class PythonModel:
 
     def unload_model(self):
         self.model = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif torch.mps.is_available():
-            torch.mps.empty_cache()
-        gc.collect()
+        clear_gpu_cache()
         self.model_loaded = False
 
     @property
@@ -87,8 +83,4 @@ class PythonModel:
         Context management method to close the TensorBoard writer upon exiting the 'with' block.
         """
         del self.model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif torch.mps.is_available():
-            torch.mps.empty_cache()
-        gc.collect()
+        clear_gpu_cache()

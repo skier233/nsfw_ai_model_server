@@ -4,6 +4,7 @@ from torchvision.transforms import v2 as transforms
 from torchvision.transforms.functional import InterpolationMode
 from torchvision.io import read_image
 import torchvision
+from lib.utils.torch_device_selector import get_preprocessing_device
 
 decord.bridge.set_bridge('torch')
 
@@ -70,11 +71,8 @@ def vr_permute(frame):
     return frame
 
 def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None, norm_config=1):
-    if device:
-        device = torch.device(device)
-    else:
-        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_preprocessing_device(device)
+    # MPS excluded - doesn't support BICUBIC interpolation
     mean, std = get_normalization_config(norm_config, device)
     if (use_half_precision):
         imageTransforms = transforms.Compose([
@@ -93,11 +91,9 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
 
 #TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
 def preprocess_video(video_path, frame_interval=0.5, img_size=512, use_half_precision=True, device=None, use_timestamps=False, vr_video=False, norm_config=1):
-    if device:
-        device = torch.device(device)
-    else:
-        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_preprocessing_device(device)
+    # MPS excluded - doesn't support BICUBIC interpolation
+
     mean, std = get_normalization_config(norm_config, device)
     frame_transforms = get_frame_transforms(use_half_precision, mean, std, vr_video, img_size)
     vr = None
