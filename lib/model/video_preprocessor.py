@@ -35,7 +35,11 @@ class VideoPreprocessorModel(Model):
                     data = {item.output_names[1]: frame, item.output_names[2]: frame_index, item.output_names[3]: itemFuture[item.input_names[3]], item.output_names[4]: itemFuture[item.input_names[4]], item.output_names[5]: itemFuture[item.input_names[6]]}
                     result = await ItemFuture.create(item, data, item.item_future.handler)
                     children.append(result)
-                self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {totalTime/i} seconds per frame.")
+                if i > 0:
+                    avg_time = totalTime / i
+                    self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {avg_time:.4f} seconds per frame.")
+                else:
+                    self.logger.warning("No frames were processed from the video.")
                 await itemFuture.set_data(item.output_names[0], children)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")
