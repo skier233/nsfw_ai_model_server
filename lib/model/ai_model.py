@@ -56,7 +56,7 @@ class AIModel(Model):
             self.max_model_batch_size = scaledBatchSize
             self.max_batch_size = scaledBatchSize
             self.max_queue_size = scaledBatchSize
-            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name}")
+            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name} ({self.model_category})")
 
     async def worker_function(self, data):
         try:
@@ -69,7 +69,7 @@ class AIModel(Model):
 
             curr = time.time()
             results = self.model.process_images(images)
-            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name}")
+            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name} ({self.model_category})")
 
             for i, item in enumerate(data):
                 item_future = item.item_future
