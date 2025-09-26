@@ -24,6 +24,6 @@ else
     echo "Building default Docker image..."
     docker build -t ai-model-server .
 fi
-echo "Docker image built as ai-model-server`
+echo "Docker image built as ai-model-server"
 python migrate.py
 python server.py
