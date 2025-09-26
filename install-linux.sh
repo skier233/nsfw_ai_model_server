@@ -17,6 +17,7 @@ elif [ "$1" = '--intel' ]; then
     # Build Intel Docker image (uses Intel-specific Dockerfile)
     echo "Building Intel Docker image..."
     docker build -f Dockerfile-intel -t ai-model-server-intel .
+    echo "~~ Make sure to pass --device /dev/dri to pass your Intel GPU into your container~~"
 else
     conda env create -f environment-linux.yml
     conda activate ai_model_server
