@@ -18,8 +18,8 @@ COPY dist/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl /tmp/
 RUN pip install /tmp/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl
 
 # Install other Python dependencies
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements-intel.txt .
+RUN pip install -r requirements-intel.txt
 
 WORKDIR /app
 EXPOSE 8000
