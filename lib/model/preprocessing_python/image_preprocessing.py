@@ -86,7 +86,10 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
             transforms.ToDtype(torch.float32, scale=True),
             transforms.Normalize(mean=mean, std=std),
         ])
-    return imageTransforms(read_image(image_path).to(device))
+    img = read_image(image_path).to(device)
+    if img.shape[0] == 4:
+        img = img[:3, :, :] # Drop alpha channel
+    return imageTransforms(img)
     
 
 #TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
