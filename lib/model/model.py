@@ -7,6 +7,10 @@ class Model:
         self.max_batch_size = configValues.get("max_batch_size", 1)
         self.instance_count = configValues.get("instance_count", 1)
         self.max_batch_waits = configValues.get("max_batch_waits", -1)
+        timeout_ms = configValues.get("batch_collect_timeout_ms", 10)
+        if timeout_ms is None:
+            timeout_ms = 0
+        self.batch_collect_timeout = max(timeout_ms, 0) / 1000.0
         self.logger = logging.getLogger("logger")
 
     async def worker_function_wrapper(self, data):

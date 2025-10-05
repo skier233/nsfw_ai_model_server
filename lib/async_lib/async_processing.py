@@ -62,6 +62,7 @@ class ModelProcessor():
         self.workers_started = False
         self.failed_loading = False
         self.is_ai_model = isinstance(self.model, AIModel)
+        self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)
 
     def update_values_from_child_model(self):
         self.instance_count = self.model.instance_count
@@ -71,6 +72,7 @@ class ModelProcessor():
             self.queue = asyncio.Queue(maxsize=self.model.max_queue_size)
         self.max_batch_size = self.model.max_batch_size
         self.max_batch_waits = self.model.max_batch_waits
+        self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)
         
     async def add_to_queue(self, data):
         await self.queue.put(data)
@@ -98,19 +100,24 @@ class ModelProcessor():
         while True:
             firstItem = await self.queue.get()
             batch_data = []
-            if (await self.batch_data_append_with_skips(batch_data, firstItem)):
+            if await self.batch_data_append_with_skips(batch_data, firstItem):
+                self.queue.task_done()
                 continue
 
-            waitsSoFar = 0
-
             while len(batch_data) < self.max_batch_size:
-                if not self.queue.empty():
-                    await self.batch_data_append_with_skips(batch_data, await self.queue.get())
-                elif waitsSoFar < self.max_batch_waits:
-                    waitsSoFar += 1
-                    await asyncio.sleep(1)
-                else:
+                try:
+                    if self.batch_collect_timeout <= 0:
+                        next_item = self.queue.get_nowait()
+                    else:
+                        next_item = await asyncio.wait_for(self.queue.get(), timeout=self.batch_collect_timeout)
+                except asyncio.QueueEmpty:
                     break
+                except asyncio.TimeoutError:
+                    break
+
+                if await self.batch_data_append_with_skips(batch_data, next_item):
+                    self.queue.task_done()
+                    continue
             
             if len(batch_data) > 0:
                 try :
