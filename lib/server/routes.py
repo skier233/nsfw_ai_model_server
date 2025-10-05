@@ -6,7 +6,9 @@ from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 from lib.model.preprocessing.input_logic import process_video_preprocess
 from lib.server.api_definitions import ImagePathList, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoResult
-from lib.server.server_manager import server_manager, app
+from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
+import torch
+import time
 from lib.model.postprocessing.category_settings import category_config
 
 logger = logging.getLogger("logger")
@@ -101,3 +103,83 @@ async def optimize_timeframe_settings(request: OptimizeMarkerSettings):
         logger.error(f"Error processing video: {e}")
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """Return a JSON object with server health information."""
+    try:
+        info = {}
+        info["status"] = "ok"
+        info["time"] = time.time()
+
+        # Pipelines
+        pipelines = server_manager.pipeline_manager.pipelines
+        pipeline_info = {}
+        for name, pipeline in pipelines.items():
+            try:
+                ai_models = pipeline.get_ai_models_info()
+                pipeline_info[name] = {
+                    "version": getattr(pipeline, "version", None),
+                    "short_name": getattr(pipeline, "short_name", None),
+                    "ai_models_count": len(ai_models),
+                    "ai_models": ai_models,
+                }
+            except Exception:
+                pipeline_info[name] = {"error": "failed to inspect pipeline"}
+
+        info["pipelines"] = pipeline_info
+
+        # Models summary
+        total_ai_models = 0
+        for p in pipeline_info.values():
+            if isinstance(p, dict) and "ai_models_count" in p:
+                total_ai_models += p["ai_models_count"]
+        info["total_ai_models"] = total_ai_models
+
+        # Outstanding requests
+        try:
+            info["outstanding_requests"] = outstanding_requests_middleware.outstanding_requests
+        except Exception:
+            info["outstanding_requests"] = None
+
+        # GPU / CUDA info
+        try:
+            info["cuda_available"] = torch.cuda.is_available()
+            if info["cuda_available"]:
+                try:
+                    info["cuda_device_count"] = torch.cuda.device_count()
+                except Exception as e:
+                    info["cuda_device_count_error"] = str(e)
+                try:
+                    curr = torch.cuda.current_device()
+                    info["current_device"] = curr
+                    info["current_device_name"] = torch.cuda.get_device_name(curr)
+                except Exception as e:
+                    info["cuda_device_error"] = str(e)
+                try:
+                    info["cuda_memory_allocated_bytes"] = torch.cuda.memory_allocated()
+                    info["cuda_memory_reserved_bytes"] = torch.cuda.memory_reserved()
+                except Exception:
+                    pass
+        except Exception as e:
+            info["cuda_check_error"] = str(e)
+
+        return info
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ready")
+async def ready_check():
+    """Readiness: returns 200 if pipelines are loaded and server is ready to accept requests."""
+    try:
+        pipelines = server_manager.pipeline_manager.pipelines
+        if pipelines and len(pipelines) > 0:
+            return {"ready": True, "loaded_pipelines": list(pipelines.keys())}
+        else:
+            raise HTTPException(status_code=503, detail="No pipelines loaded")
+    except Exception as e:
+        logger.error(f"Readiness check error: {e}")
+        raise HTTPException(status_code=503, detail=str(e))

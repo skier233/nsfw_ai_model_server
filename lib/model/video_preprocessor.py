@@ -1,8 +1,12 @@
+import asyncio
 import logging
 import time
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
-from lib.model.preprocessing_python.image_preprocessing import preprocess_video
+from lib.model.preprocessing_python.image_preprocessing import (
+    preprocess_video,
+    preprocess_video_deffcode,
+)
 
 class VideoPreprocessorModel(Model):
     def __init__(self, configValues):
@@ -13,6 +17,16 @@ class VideoPreprocessorModel(Model):
         self.device = configValues.get("device", None)
         self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
+
+        backend = str(configValues.get("preprocess_backend", "deffcode")).lower()
+        if backend != "deffcode":
+            backend = "decord"
+            self.logger.info("Video preprocessor using Decord backend")
+        else:
+            self.logger.info("Video preprocessor using DeFFcode backend")
+
+        self._preprocess_backend = backend
+        self._preprocess_callable = preprocess_video_deffcode if backend == "deffcode" else preprocess_video
     
     async def worker_function(self, data):
         for item in data:
@@ -27,7 +41,7 @@ class VideoPreprocessorModel(Model):
                 i = -1
                 oldTime = time.time()
                 norm_config = self.normalization_config or 1
-                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video, norm_config=norm_config):
+                for frame_index, frame in self._preprocess_callable(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video, norm_config=norm_config):
                     i += 1
                     newTime = time.time()
                     totalTime += newTime - oldTime

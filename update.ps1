@@ -40,6 +40,12 @@ if (Test-Path $configFilePath) {
     Remove-Item $configFilePath -Force
 }
 
+$activeFilePath = Join-Path $tempDir "config\active_ai.yaml"
+if (Test-Path $activeFilePath) {
+    Write-Host "Deleting active_ai.yaml from temporary directory to preserve existing configuration"
+    Remove-Item $activeFilePath -Force
+}
+
 Write-Host "Copying files to the current directory"
 Get-ChildItem $tempDir -Recurse | ForEach-Object {
     # Calculate the relative path from the temp directory
