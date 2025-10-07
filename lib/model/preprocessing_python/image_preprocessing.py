@@ -1,6 +1,10 @@
 import json
 import logging
 import os
+import queue
+import re
+import threading
+from contextlib import suppress
 from typing import Optional
 
 import decord
@@ -24,7 +28,7 @@ _DEFFCODE_LOG_SUPPRESSIONS = (
 
 _DEFFCODE_LOG_FILTER = None
 _DEFFCODE_DECODER = None
-
+_LOGGER = logging.getLogger(__name__)
 
 def _ensure_deffcode_log_filter() -> None:
     global _DEFFCODE_LOG_FILTER
@@ -44,7 +48,7 @@ def _ensure_deffcode_log_filter() -> None:
 def _get_deffcode_decoder():
     global _DEFFCODE_DECODER
     if _DEFFCODE_DECODER is None:
-        _ensure_deffcode_log_filter()
+        #_ensure_deffcode_log_filter()
         from deffcode import FFdecoder as _ImportedDecoder  # type: ignore[import]
 
         _DEFFCODE_DECODER = _ImportedDecoder
@@ -378,7 +382,6 @@ def preprocess_video_deffcode_gpu(
     ffprefixes = ["-vsync", "0", "-hwaccel", "cuda"]
     if device_index is not None:
         ffprefixes.extend(["-hwaccel_device", str(device_index)])
-    ffprefixes.extend(["-hwaccel_output_format", "cuda", "-extra_hw_frames", "16"])
 
     frame_step_frames = 1
     if frame_interval and frame_interval > 0:
@@ -387,18 +390,15 @@ def preprocess_video_deffcode_gpu(
         else:
             frame_step_frames = max(1, round(1.0 / frame_interval))
 
-
     vf_filters = []
     vf_filters.append(f"select=not(mod(n\\,{frame_step_frames}))")
     vf_filters.extend(
         [
-            "hwdownload",
             "format=nv12",
             "scale=in_range=tv:out_range=pc:flags=bicubic",
             "format=rgb24",
         ]
     )
-
     decoder_kwargs = {
         "-vcodec": hw_decoder,
         "-enforce_cv_patch": True,
@@ -406,9 +406,9 @@ def preprocess_video_deffcode_gpu(
         "-custom_resolution": "null",
         "-framerate": "null",
     }
+
     if vf_filters:
         decoder_kwargs["-vf"] = ",".join(vf_filters)
-
     decoder_cls = _get_deffcode_decoder()
     decoder = decoder_cls(
         video_path,
@@ -433,9 +433,7 @@ def preprocess_video_deffcode_gpu(
         if not effective_fps:
             effective_fps = _parse_fps_value(metadata.get("source_video_framerate")) if metadata else 30.0
 
-
         processed = 0
-
         for index, frame in enumerate(decoder.generateFrame()):
             if frame is None:
                 continue
@@ -457,8 +455,25 @@ def preprocess_video_deffcode_gpu(
             processed += 1
 
         if processed == 0:
-            raise RuntimeError("DeFFcode CUDA pipeline produced zero frames")
+            _LOGGER.warning(
+                "DeFFcode CUDA pipeline produced zero frames for '%s'; falling back to CPU backend.",
+                video_path,
+            )
     finally:
         terminate = getattr(decoder, "terminate", None)
         if callable(terminate):
             terminate()
+
+    if processed == 0:
+        cpu_generator = preprocess_video_deffcode(
+            video_path,
+            frame_interval=frame_interval,
+            img_size=img_size,
+            use_half_precision=use_half_precision,
+            device=device,
+            use_timestamps=use_timestamps,
+            vr_video=vr_video,
+            norm_config=norm_config,
+        )
+        for payload in cpu_generator:
+            yield payload
