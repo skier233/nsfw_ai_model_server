@@ -46,15 +46,19 @@ jobs:
           context: .
           file: ./Dockerfile.ci
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:latest
-            ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:${{ github.sha }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          platforms:
+            - linux/amd64
+            - linux/arm64
+          tags:
+            - ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:latest
+            - ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:${{ github.sha }}
+          cache-from:
+            - type=local,src=/tmp/.buildx-cache
+          cache-to: |
+            type=local,dest=/tmp/.buildx-cache-new,mode=max
 
       - name: Move cache
-        if: success()
+        if: ${{ success() }}
         run: |
           rm -rf /tmp/.buildx-cache || true
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
