@@ -3,11 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_NAME="ai_model_server"
 
 if ! command -v conda >/dev/null 2>&1; then
-    echo "Conda is not installed. Please run ./install-conda-linux.sh first." >&2
+    echo "Conda is not installed. Please run install/install-conda-linux.sh first." >&2
     exit 1
 fi
 
@@ -45,25 +45,25 @@ fi
 
 case "$MODE" in
     nvidia)
-        ENV_FILE="environment-linux.yml"
+        ENV_FILE="$SCRIPT_DIR/environment-linux.yml"
         ;;
     amd)
-        ENV_FILE="environment-linux-amd.yml"
+        ENV_FILE="$SCRIPT_DIR/environment-linux-amd.yml"
         ;;
     intel)
-        ENV_FILE="environment-linux-intel.yml"
+        ENV_FILE="$SCRIPT_DIR/environment-linux-intel.yml"
         ;;
 esac
 
 echo "Creating conda environment from $ENV_FILE..."
-conda env create -f "$PROJECT_ROOT/$ENV_FILE"
+conda env create -f "$ENV_FILE"
 
 echo "Activating environment '$ENV_NAME'..."
 conda activate "$ENV_NAME"
 
 if [[ "$MODE" == "amd" ]]; then
     echo "Running AMD post-install steps..."
-    source "$PROJECT_ROOT/install-amd-post.sh"
+    source "$SCRIPT_DIR/install-amd-post.sh"
 fi
 
 if [[ "$MODE" == "nvidia" ]]; then

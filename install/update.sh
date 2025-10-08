@@ -14,7 +14,7 @@ get_latest_release_version() {
 
 # Function to read the local version from config.yaml
 get_local_version() {
-    configPath="./config/version.yaml"
+    configPath="../config/version.yaml"
     if [[ -f "$configPath" ]]; then
         localVersion=$(grep 'VERSION:' $configPath | awk '{print $2}')
         echo $localVersion

@@ -45,7 +45,7 @@ class ServerManager:
         latest_version = get_latest_release_version(self.logger)
         self.logger.debug(f"Current version: {version}, Latest version: {latest_version}")
         if version != latest_version:
-            self.logger.warning("There is a new version available! Please update the server using update.sh or update.ps1")
+            self.logger.warning("There is a new version available! Please update the server using install/update.sh or install/update.ps1")
         self.config = config
         self.pipeline_manager = PipelineManager()
         self.default_image_pipeline = config.get("default_image_pipeline", None)

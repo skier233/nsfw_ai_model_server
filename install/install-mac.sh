@@ -3,11 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_NAME="ai_model_server"
 
 if ! command -v conda >/dev/null 2>&1; then
-	echo "Conda is not installed. Please run ./install-conda-mac.sh first." >&2
+	echo "Conda is not installed. Please run install/install-conda-mac.sh first." >&2
 	exit 1
 fi
 
@@ -23,7 +23,7 @@ if conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
 fi
 
 echo "Creating conda environment from environment-mac.yml..."
-conda env create -f "$PROJECT_ROOT/environment-mac.yml"
+conda env create -f "$SCRIPT_DIR/environment-mac.yml"
 
 echo "Activating environment '$ENV_NAME'..."
 conda activate "$ENV_NAME"

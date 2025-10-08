@@ -7,7 +7,7 @@ function Get-LatestReleaseVersion {
 
 # Function to read the local version from config.yaml
 function Get-LocalVersion {
-    $configPath = "./config/version.yaml"
+    $configPath = "../config/version.yaml"
     $configContent = Get-Content $configPath -Raw
     if ($configContent -match 'VERSION:\s*(\S+)') {
         return $matches[1]
