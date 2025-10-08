@@ -24,13 +24,10 @@ class PythonModel:
                 padding_size = self.max_batch_size - original_batch_size
                 padding = torch.zeros((padding_size, *preprocessed_images.shape[1:]), device=self.device)
                 preprocessed_images = torch.cat([preprocessed_images, padding], dim=0)
-        if self.device.type == 'cuda' and preprocessed_images.dtype != torch.float16:
+        if preprocessed_images.dtype != torch.float16:
             preprocessed_images = preprocessed_images.half()  # Convert to half precision
         with torch.no_grad():
-            if self.device.type == 'cuda':
-                with torch.autocast("cuda", enabled=True):
-                    output = self.model(preprocessed_images)
-            else:
+            with torch.autocast(self.device.type, enabled=True):
                 output = self.model(preprocessed_images)
             if applySigmoid:
                 output = torch.sigmoid(output)

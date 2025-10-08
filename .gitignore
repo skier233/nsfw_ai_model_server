@@ -159,3 +159,6 @@ cython_debug/
 TODO.txt
 *.zip
 /temp
+nsfw_ai_model_server/
+/config/models/*
+models/.ai_license_fingerprint

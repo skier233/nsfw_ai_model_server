@@ -51,6 +51,12 @@ if [ -f "$configFilePath" ]; then
     rm -f "$configFilePath"
 fi
 
+activeFilePath="$tempDir/config/active_ai.yaml"
+if [ -f "$activeFilePath" ]; then
+    echo "Deleting active_ai.yaml from temporary directory to preserve existing configuration"
+    rm -f "$activeFilePath"
+fi
+
 echo "Copying files to the current directory"
 rsync -av --exclude='update.sh' $tempDir/* . || { echo "Failed to copy files."; exit 1; }
 echo "Cleaning up"
