@@ -1,11 +1,6 @@
-PyYAML==6.0.2
-decord
-fastapi==0.112.2
-pycryptodomex==3.20.0
-uvicorn
-requests
-aiohttp
-colorlog
-psutil
-pydantic==2.8.2
-pydantic_core==2.20.1
+# Intel GPU requirements (Linux with Intel Extension for PyTorch)
+# Note: Intel Extension for PyTorch and related dependencies should be added here
+# TODO: Add intel-extension-for-pytorch and oneccl_bind_pt
+
+# Common dependencies
+-r requirements-base.txt

@@ -1,10 +1,12 @@
 services:
   nsfw-ai-server:
-    image: ghcr.io/skier233/nsfw_ai_model_server:latest
+    image: ghcr.io/skier233/nsfw_ai_model_server:latest  # NVIDIA build (default)
+    # image: ghcr.io/skier233/nsfw_ai_model_server:intel  # Intel Arc build (uncomment to use)
     container_name: nsfw-ai-server
     restart: unless-stopped
     
-    # GPU support
+  # GPU support
+  # For Intel GPUs, remove this deploy/resources block and the NVIDIA_* environment variables below.
     deploy:
       resources:
         reservations:
@@ -23,7 +25,7 @@ services:
     
     volumes:
       # Named volume for media (models, data, etc.)
-      - mydockervolume:/media
+      - nsfw-ai-data:/media
       # Mount current directory as /app for development/config
       - .:/app:rw
     

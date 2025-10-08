@@ -1,13 +1,6 @@
+# Mac (Apple Silicon M1/M2/M3 and Intel) requirements
 torch==2.7.0
 torchvision==0.22.0
-PyYAML==6.0.2
-deffcode
-fastapi==0.112.2
-pycryptodomex==3.20.0
-uvicorn
-requests
-aiohttp
-colorlog
-psutil
-pydantic==2.8.2
-pydantic_core==2.20.1
+
+# Common dependencies
+-r requirements-base.txt

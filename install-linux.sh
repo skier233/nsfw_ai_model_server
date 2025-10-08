@@ -1,30 +1,78 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Activate conda environment and start server
-conda deactivate
-conda remove -n ai_model_server --all
-if [ "$1" = '--amd' ]; then
-    echo "AMD-Mode activated!"
-    # Create Env with special libs
-    conda env create -f environment-linux-amd.yml
-    source ./install-amd-post.sh
-    # Build AMD Docker image (uses base Dockerfile)
-    echo "Building AMD Docker image..."
-    docker build -t ai-model-server-amd .
-elif [ "$1" = '--intel' ]; then
-    echo "Intel-Mode activated!"
-    # Create Env with Intel-specific libs
-    # Build Intel Docker image (uses Intel-specific Dockerfile)
-    echo "Building Intel Docker image..."
-    docker build -f Dockerfile-intel -t ai-model-server-intel .
-    echo "~~ Make sure to pass --device /dev/dri to pass your Intel GPU into your container~~"
-else
-    conda env create -f environment-linux.yml
-    conda activate ai_model_server
-    # Build default Docker image
-    echo "Building default Docker image..."
-    docker build -t ai-model-server .
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR"
+ENV_NAME="ai_model_server"
+
+if ! command -v conda >/dev/null 2>&1; then
+    echo "Conda is not installed. Please run ./install-conda-linux.sh first." >&2
+    exit 1
 fi
-echo "Docker image built as ai-model-server"
-python migrate.py
-python server.py
+
+# Ensure conda shell functions are available
+eval "$(conda shell.bash hook)"
+
+MODE="nvidia"
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --amd)
+            MODE="amd"
+            ;;
+        --intel)
+            MODE="intel"
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--amd|--intel]" >&2
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--amd|--intel]" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+echo "Preparing Conda environment for mode: $MODE"
+conda deactivate >/dev/null 2>&1 || true
+
+if conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
+    echo "Removing existing conda environment '$ENV_NAME'..."
+    conda remove -n "$ENV_NAME" --all -y
+fi
+
+case "$MODE" in
+    nvidia)
+        ENV_FILE="environment-linux.yml"
+        ;;
+    amd)
+        ENV_FILE="environment-linux-amd.yml"
+        ;;
+    intel)
+        ENV_FILE="environment-linux-intel.yml"
+        ;;
+esac
+
+echo "Creating conda environment from $ENV_FILE..."
+conda env create -f "$PROJECT_ROOT/$ENV_FILE"
+
+echo "Activating environment '$ENV_NAME'..."
+conda activate "$ENV_NAME"
+
+if [[ "$MODE" == "amd" ]]; then
+    echo "Running AMD post-install steps..."
+    source "$PROJECT_ROOT/install-amd-post.sh"
+fi
+
+if [[ "$MODE" == "nvidia" ]]; then
+    echo "Installing FFmpeg with CUDA/NVDEC support..."
+    python "$PROJECT_ROOT/scripts/install_ffmpeg_cuda.py"
+fi
+
+echo "Running database migrations..."
+python "$PROJECT_ROOT/migrate.py"
+
+echo "Starting server..."
+python "$PROJECT_ROOT/server.py"
