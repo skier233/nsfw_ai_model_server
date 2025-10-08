@@ -20,3 +20,5 @@ temp*
 # Keep necessary files for build
 !requirements.txt
 !Dockerfile.ci
+!dist/
+!dist/*.whl
