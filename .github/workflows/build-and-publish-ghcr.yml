@@ -64,4 +64,7 @@ jobs:
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
 
       - name: Output image name
-        run: echo "Pushed: ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:latest"
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:latest
+        run: |
+          echo "Pushed: $IMAGE"
