@@ -35,7 +35,6 @@ jobs:
         with:
           path: |
             ~/.cache/pip
-            /tmp/.buildx-cache
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -50,14 +49,11 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:latest
             ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:${{ github.sha }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          # Use registry-backed build cache to avoid filling runner disk
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/nsfw_ai_model_server:buildcache,mode=max
 
-      - name: Move cache
-        if: ${{ success() }}
-        run: |
-          rm -rf /tmp/.buildx-cache || true
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+      # Registry-backed cache used; no need to move local cache on the runner
 
       - name: Output image name
         env:
