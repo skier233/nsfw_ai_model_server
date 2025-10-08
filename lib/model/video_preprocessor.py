@@ -8,6 +8,7 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video,
     preprocess_video_deffcode,
     preprocess_video_deffcode_gpu,
+    preprocess_video_deffcode_auto
 )
 
 class VideoPreprocessorModel(Model):
@@ -20,16 +21,21 @@ class VideoPreprocessorModel(Model):
         self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
 
-        requested_backend = str(configValues.get("preprocess_backend", "deffcode_gpu")).lower()
+        requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
         self._preprocess_backend = "decord"
         self._preprocess_callable = preprocess_video
 
-        if requested_backend in {"deffcode_gpu", "deffcode"}:
+        if requested_backend in {"deffcode_gpu", "deffcode", "deffcode_auto"}:
             backend_choice = requested_backend
             if backend_choice == "deffcode_gpu" and not torch.cuda.is_available():
                 self.logger.warning(
                     "CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
+                )
+                backend_choice = "deffcode"
+            elif backend_choice == "deffcode_auto" and not torch.cuda.is_available():
+                self.logger.info(
+                    "DeFFcode Auto selected and CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
                 )
                 backend_choice = "deffcode"
 
@@ -37,6 +43,10 @@ class VideoPreprocessorModel(Model):
                 self._preprocess_backend = "deffcode_gpu"
                 self._preprocess_callable = preprocess_video_deffcode_gpu
                 self.logger.info("Video preprocessor using DeFFcode GPU backend")
+            elif backend_choice == "deffcode_auto":
+                self._preprocess_backend = "deffcode_auto"
+                self._preprocess_callable = preprocess_video_deffcode_auto
+                self.logger.info("Video preprocessor using DeFFcode Auto backend")
             else:
                 self._preprocess_backend = "deffcode"
                 self._preprocess_callable = preprocess_video_deffcode
@@ -142,7 +152,9 @@ class VideoPreprocessorModel(Model):
                         backend_used,
                     )
                 else:
-                    self.logger.info("No frames were produced during preprocessing using %s backend.", backend_used)
+                    error_msg = f"No frames were produced during preprocessing of '{input_data}' using {backend_used} backend."
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
                 await itemFuture.set_data(item.output_names[0], children)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")

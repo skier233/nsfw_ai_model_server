@@ -5,10 +5,8 @@ import queue
 import re
 import threading
 from contextlib import suppress
-from time import perf_counter
 from typing import Optional
 
-import decord
 import torch
 from torchvision.transforms import v2 as transforms
 from torchvision.transforms.functional import InterpolationMode
@@ -17,14 +15,12 @@ import torchvision
 import numpy as np
 
 try:
-    from torchaudio.io import StreamReader as TorchaudioStreamReader
-
-    _HAS_TORCHAUDIO = True
+    import decord
+    decord.bridge.set_bridge('torch')
+    _HAS_DECORD = True
 except Exception:  # pragma: no cover - optional dependency
-    TorchaudioStreamReader = None
-    _HAS_TORCHAUDIO = False
-
-decord.bridge.set_bridge('torch')
+    decord = None
+    _HAS_DECORD = False
 
 _DEFFCODE_LOG_SUPPRESSIONS = (
     "Manually discarding `frame_format`",
@@ -92,8 +88,8 @@ def _ensure_torch_tensor(
         tensor = frame.to_torch()
     else:
         array = np.asarray(frame)
-        #array.setflags(write=True)
-        tensor = torch.from_numpy(array)
+        copy = np.copy(array)
+        tensor = torch.from_numpy(copy)
 
     if device is not None:
         if pin_memory and tensor.device.type == "cpu" and torch.cuda.is_available():
@@ -111,6 +107,8 @@ def get_video_duration_torchvision(video_path):
     return duration
 
 def get_video_duration_decord(video_path):
+    if not _HAS_DECORD:
+        raise RuntimeError("decord is not installed; install decord to use this function")
     vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
     num_frames = len(vr)
     frame_rate = vr.get_avg_fps()
@@ -169,56 +167,14 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
     return imageTransforms(read_image(image_path).to(device))
     
 
-def _prepare_frame(frame, device, vr_video, frame_transforms, *, profile_stats=None):
-    pin_for_gpu = False
-    non_blocking = False
-    timing_enabled = profile_stats is not None
-    prepare_start = perf_counter() if timing_enabled else None
-    ensure_start = perf_counter() if timing_enabled else None
-
-    tensor = _ensure_torch_tensor(
-        frame,
-        device,
-        pin_memory=pin_for_gpu,
-        non_blocking=non_blocking,
-    )
-
-    if timing_enabled:
-        now = perf_counter()
-        profile_stats.setdefault("ensure_tensor_time", 0.0)
-        profile_stats["ensure_tensor_time"] += now - ensure_start
-        segment_start = now
-    else:
-        segment_start = None
-
+def _prepare_frame(frame, device, vr_video, frame_transforms):
+    tensor = _ensure_torch_tensor(frame, device, pin_memory=True, non_blocking=True)
+    
     if vr_video:
         tensor = vr_permute(tensor)
-        if timing_enabled:
-            new_now = perf_counter()
-            profile_stats.setdefault("vr_permute_time", 0.0)
-            profile_stats["vr_permute_time"] += new_now - segment_start
-            segment_start = new_now
-
+    
     tensor = tensor.permute(2, 0, 1)
-
-    if timing_enabled:
-        new_now = perf_counter()
-        profile_stats.setdefault("permute_time", 0.0)
-        profile_stats["permute_time"] += new_now - segment_start
-        segment_start = new_now
-
-    tensor = frame_transforms(tensor)
-
-    if timing_enabled:
-        if tensor.is_cuda:
-            torch.cuda.synchronize(device)
-        new_now = perf_counter()
-        profile_stats.setdefault("transforms_time", 0.0)
-        profile_stats["transforms_time"] += new_now - segment_start
-        profile_stats.setdefault("prepare_time", 0.0)
-        profile_stats["prepare_time"] += new_now - prepare_start
-
-    return tensor
+    return frame_transforms(tensor) 
 
 
 #TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
@@ -232,6 +188,24 @@ def preprocess_video(
     vr_video=False,
     norm_config=1,
 ):
+    """
+    Preprocess video using decord (CPU-based).
+    Falls back to deffcode if decord is not available.
+    """
+    if not _HAS_DECORD:
+        _LOGGER.warning("decord not available, falling back to deffcode CPU preprocessing")
+        yield from preprocess_video_deffcode(
+            video_path=video_path,
+            frame_interval=frame_interval,
+            img_size=img_size,
+            use_half_precision=use_half_precision,
+            device=device,
+            use_timestamps=use_timestamps,
+            vr_video=vr_video,
+            norm_config=norm_config,
+        )
+        return
+
     if device:
         device = torch.device(device)
     else:
@@ -239,38 +213,19 @@ def preprocess_video(
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mean, std = get_normalization_config(norm_config, device)
 
-    target_height: Optional[int]
-    target_width: Optional[int]
-    if isinstance(img_size, (tuple, list)) and len(img_size) >= 2:
-        target_height = int(img_size[0])
-        target_width = int(img_size[1])
-    elif isinstance(img_size, (int, float)):
-        size_int = int(img_size)
-        target_height = size_int
-        target_width = size_int
-    else:
-        target_height = None
-        target_width = None
-
-    use_gpu_resize = (
-        target_height is not None
-        and target_width is not None
-        and target_height > 0
-        and target_width > 0
-        and not vr_video
-    )
-
     frame_transforms = get_frame_transforms(
         use_half_precision,
         mean,
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=not use_gpu_resize,
+        apply_resize=vr_video,  # Only apply resize for VR videos; decord handles it for non-VR
     )
     vr = None
-    # Decode at source resolution and rely on PyTorch resizing so we mirror the training image pipeline
-    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+    if vr_video:
+        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+    else:
+        vr = decord.VideoReader(video_path, ctx=decord.cpu(0), width=img_size, height=img_size)
     fps = float(vr.get_avg_fps()) or 30.0
     frame_step = 1
     if frame_interval and frame_interval > 0:
@@ -369,6 +324,105 @@ def _guess_deffcode_hw_decoder(codec_name: Optional[str]) -> Optional[str]:
             return value
     return _DEFFCODE_HW_DECODER_MAP.get(lowered)
 
+def preprocess_video_deffcode_auto(
+    video_path,
+    frame_interval=0.5,
+    img_size=512,
+    use_half_precision=True,
+    device=None,
+    use_timestamps=False,
+    vr_video=False,
+    norm_config=1,
+):
+    """
+    Automatically select GPU or CPU preprocessing based on video resolution and GPU availability.
+    
+    Strategy:
+    - For high-resolution videos (4K+): Use GPU preprocessing to accelerate the bottleneck
+    - For lower-resolution videos: Use CPU preprocessing to avoid GPU contention with AI models
+    - Falls back gracefully if GPU preprocessing fails
+    
+    This approach maximizes overall throughput by using GPU resources where they provide 
+    the most benefit while avoiding GPU contention when AI inference is the bottleneck.
+    """
+    if device:
+        target_device = torch.device(device)
+    else:
+        target_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_gpu_preprocessing = False
+    
+    # Determine if GPU preprocessing should be used based on resolution
+    if target_device.type == 'cuda':
+        try:
+            # Probe video metadata to check resolution
+            decoder_cls = _get_deffcode_decoder()
+            probe_decoder = decoder_cls(video_path, frame_format="null").formulate()
+            try:
+                metadata = json.loads(probe_decoder.metadata)
+                width = metadata.get("source_video_resolution", [0, 0])[0]
+                height = metadata.get("source_video_resolution", [0, 0])[1]
+                
+                # Use GPU preprocessing for 4K+ videos (with small margin for non-standard resolutions)
+                # 4K is typically 3840x2160, so we check for >= 3600 width or >= 1900 height
+                if width >= 3600 or height >= 1900:
+                    use_gpu_preprocessing = True
+                    _LOGGER.debug(
+                        "Video resolution %dx%d qualifies for GPU preprocessing",
+                        width,
+                        height,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Video resolution %dx%d will use CPU preprocessing to avoid GPU contention",
+                        width,
+                        height,
+                    )
+            finally:
+                terminate = getattr(probe_decoder, "terminate", None)
+                if callable(terminate):
+                    terminate()
+        except Exception as exc:
+            _LOGGER.warning(
+                "Failed to probe video resolution for '%s': %s. Defaulting to CPU preprocessing.",
+                video_path,
+                exc,
+            )
+            use_gpu_preprocessing = False
+
+    # Try GPU preprocessing if determined appropriate
+    if use_gpu_preprocessing:
+        try:
+            yield from preprocess_video_deffcode_gpu(
+                video_path=video_path,
+                frame_interval=frame_interval,
+                img_size=img_size,
+                use_half_precision=use_half_precision,
+                device=target_device,
+                use_timestamps=use_timestamps,
+                vr_video=vr_video,
+                norm_config=norm_config,
+            )
+            return
+        except Exception as exc:
+            _LOGGER.warning(
+                "GPU preprocessing failed for '%s': %s. Falling back to CPU.",
+                video_path,
+                exc,
+            )
+
+    # Use CPU preprocessing (either by choice or as fallback)
+    yield from preprocess_video_deffcode(
+        video_path=video_path,
+        frame_interval=frame_interval,
+        img_size=img_size,
+        use_half_precision=use_half_precision,
+        device=target_device,
+        use_timestamps=use_timestamps,
+        vr_video=vr_video,
+        norm_config=norm_config,
+    )
+
 def preprocess_video_deffcode(
     video_path,
     frame_interval=0.5,
@@ -379,7 +433,10 @@ def preprocess_video_deffcode(
     vr_video=False,
     norm_config=1,
 ):
-
+    """
+    Preprocess video using CPU-based DeFFcode with FFmpeg filtering.
+    Uses FFmpeg select filter for efficient frame skipping.
+    """
     if device:
         device = torch.device(device)
     else:
@@ -400,56 +457,54 @@ def preprocess_video_deffcode(
         target_height = None
         target_width = None
 
-    use_gpu_resize = (
-        target_height is not None
-        and target_width is not None
-        and target_height > 0
-        and target_width > 0
-        and not vr_video
-    )
-
     frame_transforms = get_frame_transforms(
         use_half_precision,
         mean,
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=not use_gpu_resize,
+        apply_resize=True,  # Always use PyTorch resize in CPU mode
     )
 
-    decoder_kwargs = {}
+    # Build FFmpeg filter chain
+    decoder_kwargs = {
+        "-ffprefixes": ["-vsync", "0"],  # Disable vsync for accurate frame selection
+    }
     if not vr_video:
         decoder_kwargs["-custom_resolution"] = "null"
 
+    # Probe metadata first to get FPS for frame-based selection
     decoder_cls = _get_deffcode_decoder()
-    decoder = decoder_cls(video_path, frame_format="rgb24", **decoder_kwargs).formulate()
-
+    probe_decoder = decoder_cls(video_path, frame_format="null").formulate()
     try:
-        metadata = json.loads(decoder.metadata)
+        metadata = json.loads(probe_decoder.metadata)
     except Exception:
         metadata = {}
+    finally:
+        terminate = getattr(probe_decoder, "terminate", None)
+        if callable(terminate):
+            terminate()
 
     source_fps = _parse_fps_value(metadata.get("source_video_framerate")) if metadata else None
-    output_fps = _parse_fps_value(metadata.get("output_framerate")) if metadata else None
-    effective_fps = source_fps or output_fps or 30.0
+    effective_fps = source_fps or 30.0
 
+    # Add frame-based select filter to skip frames at decode time
     frame_step_frames = 1
-    if frame_interval and frame_interval > 0:
-        if source_fps:
-            frame_step_frames = max(1, round(source_fps * frame_interval))
-        elif output_fps:
-            frame_step_frames = max(1, round(output_fps * frame_interval))
-        else:
-            frame_step_frames = max(1, round(1.0 / frame_interval))
+    if frame_interval and frame_interval > 0 and source_fps:
+        frame_step_frames = max(1, round(source_fps * frame_interval))
+    
+    if frame_step_frames > 1:
+        vf_filter = f"select='not(mod(n,{frame_step_frames}))'"
+        decoder_kwargs["-vf"] = vf_filter
+
+    decoder = decoder_cls(video_path, frame_format="rgb24", **decoder_kwargs).formulate()
 
     processed = 0
 
     try:
+        # FFmpeg select filter handles frame skipping, so we process all frames returned
         for index, frame in enumerate(decoder.generateFrame()):
             if frame is None:
-                continue
-
-            if frame_interval and frame_interval > 0 and (index % frame_step_frames) != 0:
                 continue
 
             tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
@@ -460,80 +515,7 @@ def preprocess_video_deffcode(
                 else:
                     output_index = index / (effective_fps or 1.0)
             else:
-                output_index = index
-
-            yield (output_index, tensor)
-            processed += 1
-    finally:
-        terminate = getattr(decoder, "terminate", None)
-        if callable(terminate):
-            terminate()
-
-
-def preprocess_video_deffcode_gpu_minimal(
-    video_path,
-    frame_interval=0.5,
-    img_size=512,
-    use_half_precision=True,
-    device=None,
-    use_timestamps=False,
-    vr_video=False,
-    norm_config=1,
-):
-    """Minimal fast implementation based on working experiment."""
-    if device:
-        device = torch.device(device)
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    if device.type != 'cuda':
-        raise RuntimeError("CUDA device unavailable")
-
-    mean, std = get_normalization_config(norm_config, device)
-    frame_transforms = get_frame_transforms(
-        use_half_precision,
-        mean,
-        std,
-        vr_video=vr_video,
-        img_size=img_size,
-        apply_resize=False,  # GPU resize in FFmpeg
-    )
-
-    # Minimal decoder setup like the fast experiment
-    base_prefixes = ['-vsync', '0', '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
-    if device.index is not None:
-        base_prefixes.extend(['-hwaccel_device', str(device.index)])
-    elif torch.cuda.device_count() > 0:
-        base_prefixes.extend(['-hwaccel_device', str(torch.cuda.current_device())])
-
-    interval_expr = _format_ffmpeg_float(frame_interval) if frame_interval and frame_interval > 0 else "2"
-    vf = f"select='not(mod(t,{interval_expr}))',scale_cuda={img_size}:{img_size}:interp_algo=bicubic,hwdownload,format=nv12"
-
-    kwargs = {
-        '-vcodec': 'hevc_cuvid',
-        '-ffprefixes': base_prefixes,
-        '-vf': vf,
-    }
-
-    decoder_cls = _get_deffcode_decoder()
-    decoder = decoder_cls(video_path, frame_format='rgb24', **kwargs).formulate()
-
-    processed = 0
-    try:
-        for frame in decoder.generateFrame():
-            if frame is None:
-                continue
-
-            # Simple conversion like the experiment
-            array = np.asarray(frame).copy()  # Make writable copy
-            tensor = torch.from_numpy(array)
-            tensor = tensor.permute(2, 0, 1).to(device)
-            tensor = frame_transforms(tensor)
-
-            if use_timestamps:
-                output_index = processed * frame_interval if frame_interval and frame_interval > 0 else float(processed)
-            else:
-                output_index = processed
+                output_index = processed  # Use processed count as index
 
             yield (output_index, tensor)
             processed += 1
@@ -552,10 +534,12 @@ def preprocess_video_deffcode_gpu(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
-    _disable_gpu_resize: bool = False,
-    profile: Optional[dict] = None,
 ):
-
+    """
+    Preprocess video using NVDEC hardware acceleration via DeFFcode.
+    Uses GPU-based decoding for maximum performance.
+    Resizing is handled by PyTorch transforms for consistency with CPU preprocessing.
+    """
     if device:
         device = torch.device(device)
     else:
@@ -566,35 +550,14 @@ def preprocess_video_deffcode_gpu(
 
     mean, std = get_normalization_config(norm_config, device)
 
-    target_height: Optional[int]
-    target_width: Optional[int]
-    if isinstance(img_size, (tuple, list)) and len(img_size) >= 2:
-        target_height = int(img_size[0])
-        target_width = int(img_size[1])
-    elif isinstance(img_size, (int, float)):
-        size_int = int(img_size)
-        target_height = size_int
-        target_width = size_int
-    else:
-        target_height = None
-        target_width = None
-
-    use_gpu_resize = (
-        not _disable_gpu_resize
-        and target_height is not None
-        and target_width is not None
-        and target_height > 0
-        and target_width > 0
-        and not vr_video
-    )
-
+    # Always use PyTorch resize for consistency with CPU preprocessing
     frame_transforms = get_frame_transforms(
         use_half_precision,
         mean,
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=not use_gpu_resize,
+        apply_resize=True,
     )
 
     # Probe metadata to determine the appropriate NVDEC decoder
@@ -639,16 +602,11 @@ def preprocess_video_deffcode_gpu(
             frame_step_frames = max(1, round(1.0 / frame_interval))
 
     vf_filters = []
-    if frame_interval and frame_interval > 0:
-        interval_expr = _format_ffmpeg_float(frame_interval)
-        vf_filters.append(f"select='not(mod(t,{interval_expr}))'")
-    elif frame_step_frames > 1:
+    # Use frame-based select filter for consistency
+    if frame_step_frames > 1:
         vf_filters.append(f"select=not(mod(n\\,{frame_step_frames}))")
-    if use_gpu_resize:
-        interpolation = "bicubic"
-        vf_filters.append(
-            f"scale_cuda={target_width}:{target_height}:interp_algo={interpolation}"
-        )
+    
+    # Add hwdownload and format conversion for NVDEC
     vf_filters.extend(
         [
             "hwdownload",
@@ -673,22 +631,7 @@ def preprocess_video_deffcode_gpu(
         **decoder_kwargs,
     ).formulate()
 
-    profile_enabled = profile is not None
-    if profile_enabled:
-        profile.setdefault("frames", 0)
-        profile.setdefault("decoded_frames", 0)
-        profile.setdefault("skipped_frames", 0)
-        profile.setdefault("decode_time", 0.0)
-        profile.setdefault("ensure_tensor_time", 0.0)
-        profile.setdefault("vr_permute_time", 0.0)
-        profile.setdefault("permute_time", 0.0)
-        profile.setdefault("transforms_time", 0.0)
-        profile.setdefault("prepare_time", 0.0)
-        profile.setdefault("total_time", 0.0)
-        profile.setdefault("emitted_indices", [])
-
     processed = 0
-    wall_start = perf_counter() if profile_enabled else None
 
     try:
         try:
@@ -711,98 +654,38 @@ def preprocess_video_deffcode_gpu(
             if interval_fps:
                 effective_fps = interval_fps
 
-        frame_iter = decoder.generateFrame()
-        index = 0
-        while True:
-            decode_start = perf_counter() if profile_enabled else None
-            try:
-                frame = next(frame_iter)
-            except StopIteration:
-                break
-
-            if profile_enabled:
-                profile["decode_time"] += perf_counter() - decode_start
-                profile["decoded_frames"] += 1
-
-            current_index = index
-            index += 1
-
+        # FFmpeg select filter handles frame skipping, so we process all frames returned
+        for index, frame in enumerate(decoder.generateFrame()):
             if frame is None:
                 continue
 
-            # FFmpeg select filter already handles frame skipping, no need to skip in Python
-            tensor = _prepare_frame(
-                frame,
-                device,
-                vr_video,
-                frame_transforms,
-                profile_stats=profile if profile_enabled else None,
-            )
+            tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
 
             if use_timestamps:
                 if frame_interval and frame_interval > 0:
                     output_index = processed * frame_interval
                 else:
-                    output_index = current_index / (effective_fps or 1.0)
+                    output_index = index / (effective_fps or 1.0)
             else:
                 if frame_interval and frame_interval > 0:
                     output_index = processed * frame_step_frames
                 else:
-                    output_index = current_index
+                    output_index = index
 
             yield (output_index, tensor)
             processed += 1
-            if profile_enabled:
-                profile["frames"] += 1
-                profile["emitted_indices"].append(current_index)
-
-        if processed == 0:
-            if use_gpu_resize and not _disable_gpu_resize:
-                _LOGGER.warning(
-                    "DeFFcode CUDA pipeline produced zero frames for '%s' when using scale_cuda; retrying without GPU resize.",
-                    video_path,
-                )
-            else:
-                _LOGGER.warning(
-                    "DeFFcode CUDA pipeline produced zero frames for '%s'; falling back to CPU backend.",
-                    video_path,
-                )
     finally:
         terminate = getattr(decoder, "terminate", None)
         if callable(terminate):
             terminate()
-        if profile_enabled and wall_start is not None:
-            profile["total_time"] += perf_counter() - wall_start
-            _LOGGER.info(
-                "DeFFcode CUDA profile: frames=%d decoded=%d skipped=%d total=%.3fs decode=%.3fs prepare=%.3fs ensure=%.3fs permute=%.3fs transforms=%.3fs",
-                profile.get("frames", 0),
-                profile.get("decoded_frames", 0),
-                profile.get("skipped_frames", 0),
-                profile.get("total_time", 0.0),
-                profile.get("decode_time", 0.0),
-                profile.get("prepare_time", 0.0),
-                profile.get("ensure_tensor_time", 0.0),
-                profile.get("permute_time", 0.0),
-                profile.get("transforms_time", 0.0),
-            )
 
-    if processed == 0:
-        if use_gpu_resize and not _disable_gpu_resize:
-            yield from preprocess_video_deffcode_gpu(
-                video_path,
-                frame_interval=frame_interval,
-                img_size=img_size,
-                use_half_precision=use_half_precision,
-                device=device,
-                use_timestamps=use_timestamps,
-                vr_video=vr_video,
-                norm_config=norm_config,
-                _disable_gpu_resize=True,
-                profile=profile,
-            )
-            return
-
-        cpu_generator = preprocess_video_deffcode(
+    # Retry without GPU resize if zero frames and GPU resize was enabled
+    if processed == 0 and use_gpu_resize and not _disable_gpu_resize:
+        _LOGGER.warning(
+            "DeFFcode CUDA pipeline with scale_cuda produced zero frames for '%s'; retrying without GPU resize.",
+            video_path,
+        )
+        yield from preprocess_video_deffcode_gpu(
             video_path,
             frame_interval=frame_interval,
             img_size=img_size,
@@ -811,253 +694,5 @@ def preprocess_video_deffcode_gpu(
             use_timestamps=use_timestamps,
             vr_video=vr_video,
             norm_config=norm_config,
-        )
-        for payload in cpu_generator:
-            yield payload
-
-
-def preprocess_video_torchaudio_gpu(
-    video_path,
-    frame_interval=0.5,
-    img_size=512,
-    use_half_precision=True,
-    device=None,
-    use_timestamps=False,
-    vr_video=False,
-    norm_config=1,
-):
-    if not _HAS_TORCHAUDIO:
-        raise RuntimeError("torchaudio is not installed; install torchaudio with CUDA support to use this backend")
-
-    if device:
-        device = torch.device(device)
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    if device.type != 'cuda':
-        raise RuntimeError("CUDA device unavailable for torchaudio GPU preprocessing")
-
-    mean, std = get_normalization_config(norm_config, device)
-    frame_transforms = get_frame_transforms(
-        use_half_precision,
-        mean,
-        std,
-        vr_video=vr_video,
-        img_size=img_size,
-    )
-
-    # Mitigate duplicate OpenMP runtime errors on Windows when torchaudio initialises CUDA
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", os.environ.get("KMP_DUPLICATE_LIB_OK", "TRUE"))
-
-    try:
-        metadata_probe_stream = TorchaudioStreamReader(video_path)
-    except Exception as exc:  # pragma: no cover - optional dependency path
-        raise RuntimeError(f"Failed to open '{video_path}' via torchaudio StreamReader") from exc
-
-    try:
-        src_info = metadata_probe_stream.get_src_stream_info(0)
-    except Exception:
-        src_info = None
-    finally:
-        metadata_probe_stream = None
-
-    codec_name = None
-    src_frame_rate = None
-    if src_info is not None:
-        codec_name = getattr(src_info, "codec_name", None) or getattr(src_info, "codec", None)
-        src_frame_rate = (
-            getattr(src_info, "frame_rate", None)
-            or getattr(src_info, "avg_frame_rate", None)
-            or getattr(src_info, "frame_rate_num", None)
-        )
-
-    decoder_name = _guess_deffcode_hw_decoder(codec_name)
-    if decoder_name is None:
-        raise RuntimeError(
-            "Unable to determine a torchaudio CUDA decoder for codec "
-            f"'{codec_name}'. Set DEFFCODE_HW_DECODER or re-encode the source."
-        )
-
-    if device.index is not None:
-        hw_accel_value = f"cuda:{device.index}"
-    else:
-        hw_accel_value = "cuda"
-
-    target_fps = _target_fps(frame_interval) if frame_interval and frame_interval > 0 else None
-    frame_rate_override: Optional[float] = None
-    if target_fps:
-        # Always use FFmpeg fps filter when we have a target FPS to avoid decoding unnecessary frames
-        frame_rate_override = target_fps
-
-    frames_per_chunk = 1
-
-    add_kwargs = {
-        "frames_per_chunk": frames_per_chunk,
-        "buffer_chunk_size": 3,
-        "decoder": decoder_name,
-        "hw_accel": hw_accel_value,
-        "format": None,
-    }
-    if frame_rate_override is not None:
-        add_kwargs["frame_rate"] = frame_rate_override
-
-    primary_kwargs = dict(add_kwargs)
-
-    try_configs = [("cuda", primary_kwargs)]
-
-    if primary_kwargs.get("buffer_chunk_size") is not None:
-        trimmed_kwargs = dict(primary_kwargs)
-        trimmed_kwargs.pop("buffer_chunk_size", None)
-        try_configs.append(("cuda-trimmed", trimmed_kwargs))
-
-    cpu_kwargs = {
-        "frames_per_chunk": primary_kwargs.get("frames_per_chunk", frames_per_chunk),
-        "buffer_chunk_size": primary_kwargs.get("buffer_chunk_size"),
-        "decoder": None,
-        "hw_accel": None,
-        "format": "rgb24",
-    }
-    if "frame_rate" in primary_kwargs:
-        cpu_kwargs["frame_rate"] = primary_kwargs["frame_rate"]
-    try_configs.append(("cpu", cpu_kwargs))
-
-    def _build_stream():
-        return TorchaudioStreamReader(video_path)
-
-    configured_stream = None
-    last_exc: Optional[Exception] = None
-
-    def _call_kwargs(mapping: dict) -> dict:
-        call = {}
-        for key, value in mapping.items():
-            if value is None and key not in {"format"}:
-                continue
-            call[key] = value
-        return call
-
-    for idx, (label, kwargs) in enumerate(try_configs):
-        stream_candidate = _build_stream()
-        add_method_candidate = getattr(stream_candidate, "add_basic_video_stream", None)
-        method_label = "add_basic_video_stream"
-        if add_method_candidate is None:
-            add_method_candidate = getattr(stream_candidate, "add_video_stream", None)
-            method_label = "add_video_stream"
-            if add_method_candidate is None:
-                last_exc = RuntimeError("torchaudio StreamReader lacks video stream helpers")
-                _LOGGER.debug("torchaudio stream missing video stream helpers during '%s'", label)
-                continue
-
-        _LOGGER.debug(
-            "torchaudio attempt '%s': decoder=%s hw_accel=%s frames_per_chunk=%s buffer_chunk_size=%s frame_rate=%s method=%s",
-            label,
-            kwargs.get("decoder"),
-            kwargs.get("hw_accel"),
-            kwargs.get("frames_per_chunk"),
-            kwargs.get("buffer_chunk_size"),
-            kwargs.get("frame_rate"),
-            method_label,
-        )
-        call_kwargs = _call_kwargs(kwargs)
-        _LOGGER.debug("torchaudio kwargs for '%s': %s", label, call_kwargs)
-
-        try:
-            add_method_candidate(**call_kwargs)
-            configured_stream = stream_candidate
-            if label == "cpu":
-                _LOGGER.warning(
-                    "torchaudio GPU decoding unavailable for '%s' (codec=%s); using software fallback.",
-                    video_path,
-                    codec_name,
-                )
-            break
-        except Exception as exc:
-            last_exc = exc
-            _LOGGER.debug(
-                "torchaudio add_video_stream config '%s' failed: %s",
-                label,
-                exc,
-                exc_info=True,
-            )
-            continue
-
-    if configured_stream is None:
-        raise RuntimeError("Failed to configure torchaudio CUDA decoding stream") from last_exc
-
-    stream = configured_stream
-
-    if frame_rate_override is not None:
-        effective_fps = float(frame_rate_override)
-    else:
-        effective_fps = _parse_fps_value(src_frame_rate) if src_frame_rate is not None else 30.0
-
-    stride = 1
-    if frame_interval and frame_interval > 0 and not frame_rate_override and effective_fps:
-        stride = max(1, round(effective_fps * frame_interval))
-    if stride <= 0:
-        stride = 1
-
-    total_index = 0
-    processed = 0
-
-    for chunk in stream.stream(timeout=0.0):
-        if not chunk:
-            continue
-        video_batch = chunk[0]
-        if video_batch is None:
-            continue
-        if isinstance(video_batch, np.ndarray):
-            video_batch = torch.from_numpy(video_batch)
-        if not isinstance(video_batch, torch.Tensor):
-            continue
-        if video_batch.ndim == 3:
-            video_batch = video_batch.unsqueeze(0)
-        if video_batch.numel() == 0:
-            continue
-
-        for frame in video_batch:
-            if stride > 1 and (total_index % stride) != 0:
-                total_index += 1
-                continue
-
-            current_index = total_index
-            total_index += 1
-
-            tensor = frame
-            if tensor.ndim == 4 and tensor.shape[0] == 1:
-                tensor = tensor.squeeze(0)
-            if tensor.ndim == 3 and tensor.shape[0] not in (1, 3) and tensor.shape[-1] in (1, 3):
-                tensor = tensor.permute(2, 0, 1)
-            if tensor.ndim != 3:
-                raise RuntimeError(f"Unexpected torchaudio frame shape: {tuple(tensor.shape)}")
-
-            if tensor.shape[0] == 1:
-                tensor = tensor.expand(3, -1, -1)
-
-            if vr_video:
-                tensor_hwc = tensor.permute(1, 2, 0)
-                tensor_hwc = vr_permute(tensor_hwc)
-                tensor = tensor_hwc.permute(2, 0, 1)
-
-            tensor = tensor.contiguous()
-            if tensor.device != device:
-                tensor = tensor.to(device, non_blocking=True)
-            tensor = frame_transforms(tensor)
-
-            if use_timestamps:
-                if frame_interval and frame_interval > 0:
-                    if effective_fps:
-                        timestamp = current_index / effective_fps
-                    else:
-                        timestamp = processed * frame_interval
-                else:
-                    timestamp = current_index / effective_fps if effective_fps else float(current_index)
-            else:
-                timestamp = processed
-
-            yield (timestamp, tensor)
-            processed += 1
-
-    if processed == 0:
-        raise RuntimeError(
-            "torchaudio CUDA pipeline produced zero frames. Check that the FFmpeg shared libraries and CUDA decoder are available."
+            _disable_gpu_resize=True,
         )
