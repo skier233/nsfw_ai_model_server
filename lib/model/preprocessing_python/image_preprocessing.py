@@ -678,21 +678,3 @@ def preprocess_video_deffcode_gpu(
         terminate = getattr(decoder, "terminate", None)
         if callable(terminate):
             terminate()
-
-    # Retry without GPU resize if zero frames and GPU resize was enabled
-    if processed == 0 and use_gpu_resize and not _disable_gpu_resize:
-        _LOGGER.warning(
-            "DeFFcode CUDA pipeline with scale_cuda produced zero frames for '%s'; retrying without GPU resize.",
-            video_path,
-        )
-        yield from preprocess_video_deffcode_gpu(
-            video_path,
-            frame_interval=frame_interval,
-            img_size=img_size,
-            use_half_precision=use_half_precision,
-            device=device,
-            use_timestamps=use_timestamps,
-            vr_video=vr_video,
-            norm_config=norm_config,
-            _disable_gpu_resize=True,
-        )

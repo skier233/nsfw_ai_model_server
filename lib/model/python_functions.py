@@ -1,8 +1,7 @@
 
 import asyncio
 import logging
-from lib.config.config_utils import load_config
-from lib.model.preprocessing_python.image_preprocessing import get_video_duration_decord
+from lib.model.preprocessing_python.image_preprocessing import get_video_duration_torchvision
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
@@ -36,7 +35,7 @@ async def batch_awaiter(data):
 async def video_result_postprocessor(data):
     for item in data:
         itemFuture = item.item_future
-        duration = get_video_duration_decord(itemFuture[item.input_names[1]])
+        duration = get_video_duration_torchvision(itemFuture[item.input_names[1]])
         result = {"frames": itemFuture[item.input_names[0]], "video_duration": duration, "frame_interval": float(itemFuture[item.input_names[2]]), "threshold": float(itemFuture[item.input_names[3]]), "ai_models_info": itemFuture['pipeline'].get_ai_models_info()}
         del itemFuture.data["pipeline"]
 
