@@ -1,0 +1,22 @@
+# Ignore large directories and local artifacts
+dist/
+__pycache__/
+*.pyc
+.env
+.env.*
+venv/
+models/
+data/
+logs/
+*.egg-info
+*.whl
+.idea/
+.vscode/
+
+# Exclude temp and test files
+temp/
+temp*
+
+# Keep necessary files for build
+!requirements.txt
+!Dockerfile.ci

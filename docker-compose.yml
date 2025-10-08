@@ -1,0 +1,40 @@
+services:
+  nsfw-ai-server:
+    image: ghcr.io/skier233/nsfw_ai_model_server:latest
+    container_name: nsfw-ai-server
+    restart: unless-stopped
+    
+    # GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    
+    ports:
+      - "8000:8000"
+      - "7483:7483"
+    
+    volumes:
+      # Named volume for media (models, data, etc.)
+      - mydockervolume:/media
+      # Mount current directory as /app for development/config
+      - .:/app:rw
+    
+    # Optional: Add healthcheck
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  nsfw-ai-data:
+    driver: local
