@@ -13,6 +13,7 @@ from torchvision.transforms.functional import InterpolationMode
 from torchvision.io import read_image
 import torchvision
 import numpy as np
+from deffcode import Sourcer
 
 try:
     import decord
@@ -105,6 +106,34 @@ def get_video_duration_torchvision(video_path):
     metadata = video.get_metadata()
     duration = metadata['video']['duration'][0]
     return duration
+
+def get_video_duration_deffcode(video_path):
+
+    sourcer = Sourcer(video_path).probe_stream()
+    try:
+        metadata = sourcer.retrieve_metadata()
+        # Prefer an explicit duration field if available
+        duration = metadata.get("source_duration_sec")
+        if duration is not None:
+            try:
+                return float(duration)
+            except Exception:
+                pass
+
+        # Fall back to frame-count / frame-rate
+        num_frames = metadata.get("approx_video_nframes") or metadata.get("source_video_num_frames") or 0
+        try:
+            num_frames = float(num_frames)
+        except Exception:
+            num_frames = 0.0
+
+        frame_rate = _parse_fps_value(metadata.get("source_video_framerate"), default=30.0) or 30.0
+        duration = (num_frames / frame_rate) if frame_rate and num_frames else 0.0
+        return duration
+    finally:
+        terminate = getattr(sourcer, "terminate", None)
+        if callable(terminate):
+            terminate()
 
 def get_video_duration_decord(video_path):
     if not _HAS_DECORD:
@@ -355,14 +384,14 @@ def preprocess_video_deffcode_auto(
     # Determine if GPU preprocessing should be used based on resolution
     if target_device.type == 'cuda':
         try:
-            # Probe video metadata to check resolution
-            decoder_cls = _get_deffcode_decoder()
-            probe_decoder = decoder_cls(video_path, frame_format="null").formulate()
+            # Probe video metadata to check resolution using the higher-level Sourcer API
+            sourcer = Sourcer(video_path).probe_stream()
             try:
-                metadata = json.loads(probe_decoder.metadata)
+                metadata = sourcer.retrieve_metadata()
+
                 width = metadata.get("source_video_resolution", [0, 0])[0]
                 height = metadata.get("source_video_resolution", [0, 0])[1]
-                
+
                 # Use GPU preprocessing for 4K+ videos (with small margin for non-standard resolutions)
                 # 4K is typically 3840x2160, so we check for >= 3600 width or >= 1900 height
                 if width >= 3600 or height >= 1900:
@@ -379,7 +408,7 @@ def preprocess_video_deffcode_auto(
                         height,
                     )
             finally:
-                terminate = getattr(probe_decoder, "terminate", None)
+                terminate = getattr(sourcer, "terminate", None)
                 if callable(terminate):
                     terminate()
         except Exception as exc:
