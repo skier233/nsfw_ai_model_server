@@ -1,9 +1,10 @@
 
 import logging
+import time
 import torch
 from lib.model.model import Model
 from lib.model.ai_model_python.python_model import PythonModel
-import time
+from lib.utils.torch_device_selector import get_device_string
 
 class AIModel(Model):
     def __init__(self, configValues):
@@ -30,9 +31,10 @@ class AIModel(Model):
                 raise ValueError("category_mappings is required for models with more than one category")
         self.model = None
         if self.device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available else "cpu"
+            self.device = get_device_string()
         self.localdevice = torch.device(self.device)
-        
+        self.logger.debug(f"Using device: {self.device}")
+    
         if self.device in ["cpu", "mps"]:
             self.batch_size_per_VRAM_GB = None
             self.max_queue_size = None
@@ -44,14 +46,17 @@ class AIModel(Model):
     
     def update_batch_with_mutli_models(self, model_count):
         batch_multipliers = [1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
-        if self.batch_size_per_VRAM_GB is not None and torch.cuda.is_available():
+        if self.batch_size_per_VRAM_GB is not None and (torch.cuda.is_available() or torch.xpu.is_available()):
             batch_size_temp = self.batch_size_per_VRAM_GB * batch_multipliers[model_count - 1]
-            gpuMemory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            if self.device == "cuda":
+                gpuMemory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            elif self.device == "xpu":
+                gpuMemory = torch.xpu.get_device_properties(0).total_memory / (1024 ** 3)
             scaledBatchSize = custom_round(batch_size_temp * gpuMemory)
             self.max_model_batch_size = scaledBatchSize
             self.max_batch_size = scaledBatchSize
             self.max_queue_size = scaledBatchSize
-            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name}")
+            self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name} ({self.model_category})")
 
     async def worker_function(self, data):
         try:
@@ -64,7 +69,7 @@ class AIModel(Model):
 
             curr = time.time()
             results = self.model.process_images(images)
-            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name}")
+            self.logger.debug(f"Processed {len(images)} images in {time.time() - curr} in {self.model_file_name} ({self.model_category})")
 
             for i, item in enumerate(data):
                 item_future = item.item_future

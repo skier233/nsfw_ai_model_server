@@ -68,4 +68,9 @@ echo "Update complete"
 # Activate conda environment and update
 conda activate ai_model_server
 pip uninstall ai-processing -y
-conda env update --file ./environment-linux.yml
+if [ "$1" = '--amd' ]; then
+    conda env update --file ./environment-linux-amd.yml
+    source ./install-amd-post.sh
+else
+    conda env update --file ./environment-linux.yml
+fi
