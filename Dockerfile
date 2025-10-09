@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y software-properties-common && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install pip dependencies
-COPY requirements.txt .
+COPY install/requirements.txt .
+COPY install/requirements-base.txt .
 RUN python3.12 -m pip install -r requirements.txt
 
 # Install FFmpeg with CUDA/NVDEC support
