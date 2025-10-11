@@ -35,7 +35,7 @@ class PipelineManager:
             
         if not self.pipelines:
             raise ServerStopException("Error: No valid pipelines loaded!")
-    def get_pipeline(self, pipeline_name):
+    def get_pipeline(self, pipeline_name) -> Pipeline:
         if not pipeline_name in self.pipelines:
             self.logger.error(f"Error: Pipeline: {pipeline_name} not found in valid loaded pipelines!")
             raise ValueError(f"Error: Pipeline: {pipeline_name} not found in valid loaded pipelines!")

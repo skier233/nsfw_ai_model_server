@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 from lib.model.preprocessing.input_logic import process_video_preprocess
-from lib.server.api_definitions import ImagePathList, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoResult
+from lib.server.api_definitions import ImagePathList, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoRequestV3, VideoResult
 from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
 import torch
 import time
@@ -73,6 +73,40 @@ async def process_video(request: VideoPathList):
         return return_result
     except Exception as e:
         logger.error(f"Error processing video: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.post("/v3/process_video/")
+async def process_video_v3(request: VideoRequestV3):
+    try:
+        logger.info(f"Processing video in v3 at path: {request.path}")
+
+        pipeline_name = "video_pipeline_dynamic_v3"
+        
+        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip]
+
+        result = None
+        try:
+            future = await server_manager.get_request_future(data, pipeline_name)
+            result = await future
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return result
+
+    except Exception as e:
+        logger.error(f"Error processing video: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.get("/v3/current_ai_models/")
+async def get_current_video_ai_models():
+    try:
+        pipeline_name = "video_pipeline_dynamic_v3"
+        pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
+        ai_models = pipeline.get_ai_models_info()
+        return ai_models
+    except Exception as e:
+        logger.error(f"Error getting current video AI models: {e}")
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
     

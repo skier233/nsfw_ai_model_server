@@ -174,26 +174,53 @@ def vr_permute(frame):
         frame = frame[:frame.shape[0]//2, frame.shape[1]//4:3*frame.shape[1]//4]
     return frame
 
+class DimensionError(Exception):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def __str__(self):
+        return super().__str__()
+
+    def __repr__(self):
+        return f"DimensionError({super().__str__()})"
+
 def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None, norm_config=1):
+    # Resolve device
     if device:
         device = torch.device(device)
     else:
-        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
+        # Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     mean, std = get_normalization_config(norm_config, device)
-    if (use_half_precision):
-        imageTransforms = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=InterpolationMode.BICUBIC),
-            transforms.ToDtype(torch.float16, scale=True),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-    else:
-        imageTransforms = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=InterpolationMode.BICUBIC),
-            transforms.ToDtype(torch.float32, scale=True),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-    return imageTransforms(read_image(image_path).to(device))
+
+    # Build the canonical transforms (resize -> dtype -> normalize)
+    frame_transforms = get_frame_transforms(
+        use_half_precision,
+        mean,
+        std,
+        vr_video=False,
+        img_size=img_size,
+        apply_resize=True,
+    )
+
+    # Read image using torchvision (returns a tensor). We explicitly validate
+    # dimensionality to catch animated GIFs, grayscale, or unexpected channel counts
+    img = read_image(image_path)
+    # Move to target device and run transforms
+    img = img.to(device)
+    out = frame_transforms(img)
+
+    # Validate final tensor shape: (3, img_size, img_size)
+    if out.ndim != 3 or out.shape[0] != 3:
+        raise DimensionError(
+            f"Invalid Image: Image has invalid shape {tuple(out.shape)} for '{image_path}'; "
+            f"expected (3, {img_size}, {img_size})."
+        )
+
+    return out
     
 
 def _prepare_frame(frame, device, vr_video, frame_transforms):
