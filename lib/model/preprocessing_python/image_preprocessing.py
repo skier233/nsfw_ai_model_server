@@ -449,7 +449,8 @@ def preprocess_video_deffcode_auto(
     # Try GPU preprocessing if determined appropriate
     if use_gpu_preprocessing:
         try:
-            yield from preprocess_video_deffcode_gpu(
+            yielded_any = False
+            for item in preprocess_video_deffcode_gpu(
                 video_path=video_path,
                 frame_interval=frame_interval,
                 img_size=img_size,
@@ -458,8 +459,16 @@ def preprocess_video_deffcode_auto(
                 use_timestamps=use_timestamps,
                 vr_video=vr_video,
                 norm_config=norm_config,
-            )
-            return
+            ):
+                yielded_any = True
+                yield item
+            if yielded_any:
+                return
+            else:
+                _LOGGER.warning(
+                    "GPU preprocessing yielded no frames for '%s'. Falling back to CPU.",
+                    video_path,
+                )
         except Exception as exc:
             _LOGGER.warning(
                 "GPU preprocessing failed for '%s': %s. Falling back to CPU.",

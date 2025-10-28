@@ -25,6 +25,7 @@ class VideoRequestV3(BaseModel):
     frame_interval: float = None
     threshold: float = None
     vr_video: bool = False
+    categories_to_skip: List[str] = None
 
 class OptimizeMarkerSettings(BaseModel):
     existing_json_data: Any = None
