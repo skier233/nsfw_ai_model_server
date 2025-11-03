@@ -109,3 +109,33 @@ async def image_result_postprocessor(data):
 
 
         await itemFuture.set_data(item.output_names[0], toReturn)
+
+async def image_result_postprocessor_v3(data):
+    toReturn = {}
+    for item in data:
+        itemFuture = item.item_future
+        result = itemFuture[item.input_names[0]]
+        for category, tags in result.items():
+            if category not in category_config:
+                continue
+            toReturn[category] = []
+            for tag in tags:
+                if isinstance(tag, tuple):
+                    tagname, confidence = tag
+                    if tagname not in category_config[category]:
+                        continue
+                    
+                    tag_threshold = float(get_or_default(category_config[category][tagname], 'TagThreshold', 0.5))
+                    renamed_tag = category_config[category][tagname]['RenamedTag']
+
+                    if not post_processing_config["use_category_image_thresholds"]:
+                        toReturn[category].append((renamed_tag, confidence))
+                    elif confidence >= tag_threshold:
+                        toReturn[category].append((renamed_tag, confidence))
+                else:
+                    if tag not in category_config[category]:
+                        continue
+                    renamed_tag = category_config[category][tag]['RenamedTag']
+                    toReturn[category].append(renamed_tag)
+
+        await itemFuture.set_data(item.output_names[0], toReturn)

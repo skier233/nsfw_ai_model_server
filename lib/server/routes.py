@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 from lib.model.preprocessing.input_logic import process_video_preprocess
-from lib.server.api_definitions import ImagePathList, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoRequestV3, VideoResult
+from lib.server.api_definitions import ImagePathList, ImageRequestV3, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoRequestV3, VideoResult
 from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
 import torch
 import time
@@ -98,6 +98,29 @@ async def process_video_v3(request: VideoRequestV3):
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
     
+@app.post("/v3/process_images/")
+async def process_images_v3(request: ImageRequestV3):
+    try:
+        image_paths = request.paths
+        logger.info(f"Processing {len(image_paths)} images")
+        pipeline_name = "image_pipeline_dynamic_v3"
+        pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
+        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                results[i] = {"error": str(result)}
+
+        models = pipeline.get_ai_models_info()
+        return_result = ImageResult(result=results, models=models)
+        logger.debug(f"Returning Image Result v3: {return_result}")
+        return return_result
+    except Exception as e:
+        logger.error(f"Error processing images v3: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.get("/v3/current_ai_models/")
 async def get_current_video_ai_models():
     try:
