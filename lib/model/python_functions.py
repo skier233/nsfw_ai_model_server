@@ -1,12 +1,15 @@
 
 import asyncio
 import logging
+import time
+
 from lib.model.preprocessing_python.image_preprocessing import get_video_duration_deffcode
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult, AIVideoResultV3
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
 from lib.model.skip_input import Skip
 from lib.model.postprocessing.post_processing_settings import get_or_default, post_processing_config
+
 logger = logging.getLogger("logger")
 
 async def result_coalescer(data):
@@ -53,18 +56,26 @@ async def video_result_postprocessor_v3(data):
     for item in data:
         itemFuture = item.item_future
         duration = get_video_duration_deffcode(itemFuture[item.input_names[1]])
-        currently_active_models = itemFuture['pipeline'].get_ai_models_info()
+        pipeline = itemFuture['pipeline']
+        currently_active_models = pipeline.get_ai_models_info()
 
-        result = {"frames": itemFuture[item.input_names[0]], "video_duration": duration, "frame_interval": float(itemFuture[item.input_names[2]]), "threshold": float(itemFuture[item.input_names[3]]),
-                  "ai_models_info": itemFuture['pipeline'].get_ai_models_info(), "skipped_categories": itemFuture[item.input_names[4]]}
-        del itemFuture.data["pipeline"]
+        result = {
+            "frames": itemFuture[item.input_names[0]],
+            "video_duration": duration,
+            "frame_interval": float(itemFuture[item.input_names[2]]),
+            "threshold": float(itemFuture[item.input_names[3]]),
+            "ai_models_info": currently_active_models,
+            "skipped_categories": itemFuture[item.input_names[4]],
+        }
 
+        if "pipeline" in itemFuture.data:
+            del itemFuture.data["pipeline"]
 
         used_models = [
-            m for m in currently_active_models
+            model for model in currently_active_models
             if not all(
-                c in (result.get("skipped_categories") or [])
-                for c in (m.categories)
+                category in (result.get("skipped_categories") or [])
+                for category in model.categories
             )
         ]
         result["models"] = used_models
@@ -75,9 +86,21 @@ async def video_result_postprocessor_v3(data):
         except Exception as e:
             logger.error(f"Error creating AIVideoResultV3: {e}")
             raise
-        toReturn = videoResult.to_json()
-        
-        await itemFuture.set_data(item.output_names[0], videoResult)
+
+        root_future = getattr(itemFuture, "root_future", itemFuture)
+        metrics_source = getattr(root_future, "_pipeline_metrics", {}) or {}
+        metrics = dict(metrics_source)
+        metrics.setdefault("preprocess_seconds", 0.0)
+        metrics.setdefault("ai_inference_seconds", 0.0)
+        metrics["ai_model_count"] = len(currently_active_models)
+
+        started_at = getattr(root_future, "_metrics_started_at", None)
+        if started_at is not None:
+            metrics["total_runtime_seconds"] = time.perf_counter() - started_at
+
+        payload = {"result": videoResult, "metrics": metrics}
+
+        await itemFuture.set_data(item.output_names[0], payload)
 
 async def image_result_postprocessor(data):
     toReturn = {}
@@ -111,10 +134,11 @@ async def image_result_postprocessor(data):
         await itemFuture.set_data(item.output_names[0], toReturn)
 
 async def image_result_postprocessor_v3(data):
-    toReturn = {}
     for item in data:
         itemFuture = item.item_future
+        pipeline = itemFuture['pipeline']
         result = itemFuture[item.input_names[0]]
+        toReturn = {}
         for category, tags in result.items():
             if category not in category_config:
                 continue
@@ -138,4 +162,20 @@ async def image_result_postprocessor_v3(data):
                     renamed_tag = category_config[category][tag]['RenamedTag']
                     toReturn[category].append(renamed_tag)
 
-        await itemFuture.set_data(item.output_names[0], toReturn)
+        root_future = getattr(itemFuture, "root_future", itemFuture)
+        metrics_source = getattr(root_future, "_pipeline_metrics", {}) or {}
+        metrics = dict(metrics_source)
+        metrics.setdefault("preprocess_seconds", 0.0)
+        metrics.setdefault("ai_inference_seconds", 0.0)
+        metrics["ai_model_count"] = len(pipeline.get_ai_models_info())
+
+        started_at = getattr(root_future, "_metrics_started_at", None)
+        if started_at is not None:
+            metrics["total_runtime_seconds"] = time.perf_counter() - started_at
+
+        if "pipeline" in itemFuture.data:
+            del itemFuture.data["pipeline"]
+
+        payload = {"result": toReturn, "metrics": metrics}
+
+        await itemFuture.set_data(item.output_names[0], payload)

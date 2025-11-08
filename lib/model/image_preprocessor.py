@@ -19,7 +19,17 @@ class ImagePreprocessorModel(Model):
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
                 norm_config = self.normalization_config or 1
+                start_time = time.perf_counter()
                 preprocessed_frame = preprocess_image(input_data, self.image_size, self.use_half_precision, self.device, norm_config=norm_config)
+                elapsed = time.perf_counter() - start_time
+                root_future = getattr(itemFuture, "root_future", itemFuture)
+                metrics = getattr(root_future, "_pipeline_metrics", None)
+                if metrics is None:
+                    metrics = {}
+                    setattr(root_future, "_pipeline_metrics", metrics)
+                metrics["preprocess_seconds"] = metrics.get("preprocess_seconds", 0.0) + elapsed
+                metrics["images_preprocessed"] = metrics.get("images_preprocessed", 0) + 1
+                metrics["preprocess_backend"] = "image_preprocessor"
                 await itemFuture.set_data(item.output_names[0], preprocessed_frame)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error} for file: {input_data}")

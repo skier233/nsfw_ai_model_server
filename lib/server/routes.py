@@ -89,6 +89,7 @@ async def process_video_v3(request: VideoRequestV3):
         try:
             future = await server_manager.get_request_future(data, pipeline_name)
             result = await future
+            logger.debug(f"Video v3 processing result: {result}")
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         return result
@@ -108,14 +109,47 @@ async def process_images_v3(request: ImageRequestV3):
         futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
         results = await asyncio.gather(*futures, return_exceptions=True)
 
+        aggregate_metrics = {
+            "preprocess_seconds": 0.0,
+            "ai_inference_seconds": 0.0,
+            "total_runtime_seconds": 0.0,
+            "image_count": 0,
+        }
+        preprocess_backends = set()
+
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 results[i] = {"error": str(result)}
+                continue
+
+            if isinstance(result, dict) and "metrics" in result:
+                metrics = result.get("metrics") or {}
+                aggregate_metrics["preprocess_seconds"] += metrics.get("preprocess_seconds", 0.0)
+                aggregate_metrics["ai_inference_seconds"] += metrics.get("ai_inference_seconds", 0.0)
+                aggregate_metrics["total_runtime_seconds"] += metrics.get("total_runtime_seconds", 0.0)
+                backend = metrics.get("preprocess_backend")
+                if backend:
+                    preprocess_backends.add(backend)
+                aggregate_metrics["image_count"] += 1
+                inner_result = result.get("result")
+                results[i] = inner_result if inner_result is not None else result
+            else:
+                results[i] = result
 
         models = pipeline.get_ai_models_info()
-        return_result = ImageResult(result=results, models=models)
-        logger.debug(f"Returning Image Result v3: {return_result}")
-        return return_result
+        aggregate_metrics["ai_model_count"] = len(models)
+        if aggregate_metrics["total_runtime_seconds"] > 0 and aggregate_metrics["image_count"] > 0:
+            aggregate_metrics["images_per_second"] = aggregate_metrics["image_count"] / aggregate_metrics["total_runtime_seconds"]
+        if preprocess_backends:
+            aggregate_metrics["preprocess_backend"] = preprocess_backends.pop() if len(preprocess_backends) == 1 else "mixed"
+
+        return_payload = {
+            "result": results,
+            "models": models,
+            "metrics": aggregate_metrics,
+        }
+        logger.debug(f"Returning Image Result v3: {return_payload}")
+        return return_payload
     except Exception as e:
         logger.error(f"Error processing images v3: {e}")
         logger.debug("Stack trace:", exc_info=True)

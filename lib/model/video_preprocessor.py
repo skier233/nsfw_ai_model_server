@@ -57,14 +57,13 @@ class VideoPreprocessorModel(Model):
     async def worker_function(self, data):
         for item in data:
             try:
-                totalTime = 0
+                preprocess_time = 0.0
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
                 use_timestamps = itemFuture[item.input_names[1]]
                 frame_interval = itemFuture[item.input_names[2]] or self.frame_interval
                 vr_video = itemFuture[item.input_names[5]]
                 children = []
-                oldTime = time.time()
                 norm_config = self.normalization_config or 1
                 frame_count = 0
                 preprocess_callable = self._preprocess_callable
@@ -123,11 +122,14 @@ class VideoPreprocessorModel(Model):
 
                 frame_iterator = iter(frame_source)
                 try:
-                    for frame_index, frame in frame_iterator:
+                    while True:
+                        chunk_start = time.perf_counter()
+                        try:
+                            frame_index, frame = next(frame_iterator)
+                        except StopIteration:
+                            break
+                        preprocess_time += time.perf_counter() - chunk_start
                         frame_count += 1
-                        newTime = time.time()
-                        totalTime += newTime - oldTime
-                        oldTime = newTime
                         payload = {
                             item.output_names[1]: frame,
                             item.output_names[2]: frame_index,
@@ -143,11 +145,20 @@ class VideoPreprocessorModel(Model):
                         close()
 
                 if frame_count > 0:
-                    avg_time = totalTime / frame_count
+                    avg_time = preprocess_time / frame_count
+                    root_future = getattr(itemFuture, "root_future", itemFuture)
+                    metrics = getattr(root_future, "_pipeline_metrics", None)
+                    if metrics is None:
+                        metrics = {}
+                        setattr(root_future, "_pipeline_metrics", metrics)
+                    metrics["preprocess_seconds"] = metrics.get("preprocess_seconds", 0.0) + preprocess_time
+                    metrics["frames_preprocessed"] = metrics.get("frames_preprocessed", 0) + frame_count
+                    metrics["preprocess_backend"] = backend_used
+                    metrics["average_frame_preprocess_seconds"] = avg_time
                     self.logger.info(
                         "Preprocessed %s frames in %.4f seconds (avg %.4f s/frame) using %s backend.",
                         frame_count,
-                        totalTime,
+                        preprocess_time,
                         avg_time,
                         backend_used,
                     )
