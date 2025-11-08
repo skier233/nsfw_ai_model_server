@@ -112,7 +112,6 @@ async def process_images_v3(request: ImageRequestV3):
         aggregate_metrics = {
             "preprocess_seconds": 0.0,
             "ai_inference_seconds": 0.0,
-            "total_runtime_seconds": 0.0,
             "image_count": 0,
         }
         preprocess_backends = set()
@@ -126,7 +125,6 @@ async def process_images_v3(request: ImageRequestV3):
                 metrics = result.get("metrics") or {}
                 aggregate_metrics["preprocess_seconds"] += metrics.get("preprocess_seconds", 0.0)
                 aggregate_metrics["ai_inference_seconds"] += metrics.get("ai_inference_seconds", 0.0)
-                aggregate_metrics["total_runtime_seconds"] += metrics.get("total_runtime_seconds", 0.0)
                 backend = metrics.get("preprocess_backend")
                 if backend:
                     preprocess_backends.add(backend)
@@ -138,6 +136,9 @@ async def process_images_v3(request: ImageRequestV3):
 
         models = pipeline.get_ai_models_info()
         aggregate_metrics["ai_model_count"] = len(models)
+        aggregate_metrics["total_runtime_seconds"] = (
+            aggregate_metrics["preprocess_seconds"] + aggregate_metrics["ai_inference_seconds"]
+        )
         if aggregate_metrics["total_runtime_seconds"] > 0 and aggregate_metrics["image_count"] > 0:
             aggregate_metrics["images_per_second"] = aggregate_metrics["image_count"] / aggregate_metrics["total_runtime_seconds"]
         if preprocess_backends:

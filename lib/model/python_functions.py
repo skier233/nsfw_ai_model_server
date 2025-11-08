@@ -94,9 +94,8 @@ async def video_result_postprocessor_v3(data):
         metrics.setdefault("ai_inference_seconds", 0.0)
         metrics["ai_model_count"] = len(currently_active_models)
 
-        started_at = getattr(root_future, "_metrics_started_at", None)
-        if started_at is not None:
-            metrics["total_runtime_seconds"] = time.perf_counter() - started_at
+        total_runtime = metrics.get("preprocess_seconds", 0.0) + metrics.get("ai_inference_seconds", 0.0)
+        metrics["total_runtime_seconds"] = total_runtime
 
         payload = {"result": videoResult, "metrics": metrics}
 
@@ -169,9 +168,8 @@ async def image_result_postprocessor_v3(data):
         metrics.setdefault("ai_inference_seconds", 0.0)
         metrics["ai_model_count"] = len(pipeline.get_ai_models_info())
 
-        started_at = getattr(root_future, "_metrics_started_at", None)
-        if started_at is not None:
-            metrics["total_runtime_seconds"] = time.perf_counter() - started_at
+        total_runtime = metrics.get("preprocess_seconds", 0.0) + metrics.get("ai_inference_seconds", 0.0)
+        metrics["total_runtime_seconds"] = total_runtime
 
         if "pipeline" in itemFuture.data:
             del itemFuture.data["pipeline"]
