@@ -206,9 +206,13 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
         apply_resize=True,
     )
 
-    # Read image using torchvision (returns a tensor). We explicitly validate
-    # dimensionality to catch animated GIFs, grayscale, or unexpected channel counts
+    # Read image using torchvision (returns a tensor). Handle animated sources (e.g., GIFs)
+    # by selecting the middle frame prior to further processing.
     img = read_image(image_path)
+    if img.ndim == 4:
+        frame_count = img.shape[0]
+        middle_index = frame_count // 2
+        img = img[middle_index]
     # Move to target device and run transforms
     img = img.to(device)
     out = frame_transforms(img)
