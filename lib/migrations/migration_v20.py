@@ -35,5 +35,23 @@ def migrate_to_2_0():
                             with open(yaml_path, 'w') as f:
                                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
+def migrate_to_3_0():
+    config_path = "./config/config.yaml"
+    with open(config_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+    active_pipelines = config_data.get('active_pipelines', [])
+    updated = False
+    if 'video_pipeline_dynamic_v3' not in active_pipelines:
+        active_pipelines.append('video_pipeline_dynamic_v3')
+        updated = True
+    if 'image_pipeline_dynamic_v3' not in active_pipelines:
+        active_pipelines.append('image_pipeline_dynamic_v3')
+        updated = True
+    if updated:
+        config_data['active_pipelines'] = active_pipelines
+        with open(config_path, 'w') as f:
+            yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
 if __name__ == "__main__":
     migrate_to_2_0()
+    migrate_to_3_0()
