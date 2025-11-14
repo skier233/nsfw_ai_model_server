@@ -29,8 +29,13 @@ RUN apt-get update && apt-get install -y software-properties-common && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install pip dependencies
-COPY requirements.txt .
+COPY install/requirements.txt .
+COPY install/requirements-base.txt .
 RUN python3.12 -m pip install -r requirements.txt
+
+# Install FFmpeg with CUDA/NVDEC support
+COPY scripts/install_ffmpeg_cuda.py /tmp/install_ffmpeg_cuda.py
+RUN python3.12 /tmp/install_ffmpeg_cuda.py --prefix /usr/local && rm /tmp/install_ffmpeg_cuda.py
 
 # Copy the wheel file and install it
 COPY dist/ai_processing-0.0.0-cp312-cp312-linux_x86_64.whl /tmp/

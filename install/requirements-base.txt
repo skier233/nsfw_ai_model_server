@@ -1,0 +1,14 @@
+# Common dependencies shared across all platforms
+# Platform-specific requirements files will include this via -r requirements-base.txt
+
+deffcode
+PyYAML==6.0.2
+fastapi==0.112.2
+pycryptodomex==3.20.0
+uvicorn
+requests
+aiohttp
+colorlog
+psutil
+pydantic==2.8.2
+pydantic_core==2.20.1

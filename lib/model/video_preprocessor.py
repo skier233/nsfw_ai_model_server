@@ -1,8 +1,15 @@
 import logging
 import time
+
+import torch
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
-from lib.model.preprocessing_python.image_preprocessing import preprocess_video
+from lib.model.preprocessing_python.image_preprocessing import (
+    preprocess_video,
+    preprocess_video_deffcode,
+    preprocess_video_deffcode_gpu,
+    preprocess_video_deffcode_auto
+)
 
 class VideoPreprocessorModel(Model):
     def __init__(self, configValues):
@@ -13,33 +20,152 @@ class VideoPreprocessorModel(Model):
         self.device = configValues.get("device", None)
         self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
+
+        requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
+
+        self._preprocess_backend = "decord"
+        self._preprocess_callable = preprocess_video
+
+        if requested_backend in {"deffcode_gpu", "deffcode", "deffcode_auto"}:
+            backend_choice = requested_backend
+            if backend_choice == "deffcode_gpu" and not torch.cuda.is_available():
+                self.logger.warning(
+                    "CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
+                )
+                backend_choice = "deffcode"
+            elif backend_choice == "deffcode_auto" and not torch.cuda.is_available():
+                self.logger.info(
+                    "DeFFcode Auto selected and CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
+                )
+                backend_choice = "deffcode"
+
+            if backend_choice == "deffcode_gpu":
+                self._preprocess_backend = "deffcode_gpu"
+                self._preprocess_callable = preprocess_video_deffcode_gpu
+                self.logger.info("Video preprocessor using DeFFcode GPU backend")
+            elif backend_choice == "deffcode_auto":
+                self._preprocess_backend = "deffcode_auto"
+                self._preprocess_callable = preprocess_video_deffcode_auto
+                self.logger.info("Video preprocessor using DeFFcode Auto backend")
+            else:
+                self._preprocess_backend = "deffcode"
+                self._preprocess_callable = preprocess_video_deffcode
+                self.logger.info("Video preprocessor using DeFFcode backend")
+        else:
+            self.logger.info("Video preprocessor using Decord backend")
     
     async def worker_function(self, data):
         for item in data:
             try:
-                totalTime = 0
+                preprocess_time = 0.0
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
                 use_timestamps = itemFuture[item.input_names[1]]
                 frame_interval = itemFuture[item.input_names[2]] or self.frame_interval
                 vr_video = itemFuture[item.input_names[5]]
                 children = []
-                i = -1
-                oldTime = time.time()
                 norm_config = self.normalization_config or 1
-                for frame_index, frame in preprocess_video(input_data, frame_interval, self.image_size, self.use_half_precision, self.device, use_timestamps, vr_video=vr_video, norm_config=norm_config):
-                    i += 1
-                    newTime = time.time()
-                    totalTime += newTime - oldTime
-                    oldTime = newTime
-                    data = {item.output_names[1]: frame, item.output_names[2]: frame_index, item.output_names[3]: itemFuture[item.input_names[3]], item.output_names[4]: itemFuture[item.input_names[4]], item.output_names[5]: itemFuture[item.input_names[6]]}
-                    result = await ItemFuture.create(item, data, item.item_future.handler)
-                    children.append(result)
-                if i > 0:
-                    avg_time = totalTime / i
-                    self.logger.info(f"Preprocessed {i} frames in {totalTime} seconds at an average of {avg_time:.4f} seconds per frame.")
+                frame_count = 0
+                preprocess_callable = self._preprocess_callable
+                backend_used = self._preprocess_backend
+
+                try:
+                    frame_source = preprocess_callable(
+                        input_data,
+                        frame_interval,
+                        self.image_size,
+                        self.use_half_precision,
+                        self.device,
+                        use_timestamps,
+                        vr_video=vr_video,
+                        norm_config=norm_config,
+                    )
+                except Exception as exc:
+                    if preprocess_callable is preprocess_video_deffcode_gpu:
+                        self.logger.warning(
+                            "DeFFcode GPU preprocessing failed for '%s'. Falling back to DeFFcode CPU. Error: %s",
+                            input_data,
+                            exc,
+                        )
+                        preprocess_callable = preprocess_video_deffcode
+                        backend_used = "deffcode"
+                        frame_source = preprocess_callable(
+                            input_data,
+                            frame_interval,
+                            self.image_size,
+                            self.use_half_precision,
+                            self.device,
+                            use_timestamps,
+                            vr_video=vr_video,
+                            norm_config=norm_config,
+                        )
+                    elif preprocess_callable is preprocess_video_deffcode:
+                        self.logger.warning(
+                            "DeFFcode preprocessing failed for '%s'. Falling back to Decord. Error: %s",
+                            input_data,
+                            exc,
+                        )
+                        preprocess_callable = preprocess_video
+                        backend_used = "decord"
+                        frame_source = preprocess_callable(
+                            input_data,
+                            frame_interval,
+                            self.image_size,
+                            self.use_half_precision,
+                            self.device,
+                            use_timestamps,
+                            vr_video=vr_video,
+                            norm_config=norm_config,
+                        )
+                    else:
+                        raise
+
+                frame_iterator = iter(frame_source)
+                try:
+                    while True:
+                        chunk_start = time.perf_counter()
+                        try:
+                            frame_index, frame = next(frame_iterator)
+                        except StopIteration:
+                            break
+                        preprocess_time += time.perf_counter() - chunk_start
+                        frame_count += 1
+                        payload = {
+                            item.output_names[1]: frame,
+                            item.output_names[2]: frame_index,
+                            item.output_names[3]: itemFuture[item.input_names[3]],
+                            item.output_names[4]: itemFuture[item.input_names[4]],
+                            item.output_names[5]: itemFuture[item.input_names[6]],
+                        }
+                        result = await ItemFuture.create(item, payload, item.item_future.handler)
+                        children.append(result)
+                finally:
+                    close = getattr(frame_source, "close", None)
+                    if callable(close):
+                        close()
+
+                if frame_count > 0:
+                    avg_time = preprocess_time / frame_count
+                    root_future = getattr(itemFuture, "root_future", itemFuture)
+                    metrics = getattr(root_future, "_pipeline_metrics", None)
+                    if metrics is None:
+                        metrics = {}
+                        setattr(root_future, "_pipeline_metrics", metrics)
+                    metrics["preprocess_seconds"] = metrics.get("preprocess_seconds", 0.0) + preprocess_time
+                    metrics["frames_preprocessed"] = metrics.get("frames_preprocessed", 0) + frame_count
+                    metrics["preprocess_backend"] = backend_used
+                    metrics["average_frame_preprocess_seconds"] = avg_time
+                    self.logger.info(
+                        "Preprocessed %s frames in %.4f seconds (avg %.4f s/frame) using %s backend.",
+                        frame_count,
+                        preprocess_time,
+                        avg_time,
+                        backend_used,
+                    )
                 else:
-                    self.logger.warning("No frames were processed from the video.")
+                    error_msg = f"No frames were produced during preprocessing of '{input_data}' using {backend_used} backend."
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
                 await itemFuture.set_data(item.output_names[0], children)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")

@@ -20,6 +20,7 @@ class AIModel(Model):
         self.fill_to_batch = configValues.get("fill_to_batch_size", True)
         self.model_image_size = configValues.get("model_image_size", None)
         self.model_category = configValues.get("model_category", None)
+        self.model_type = "ImClass"
         self.model_version = configValues.get("model_version", None)
         self.model_identifier = configValues.get("model_identifier", None)
         self.category_mappings = configValues.get("category_mappings", None)

@@ -1,6 +1,11 @@
+import logging
 from lib.async_lib.async_processing import QueueItem
 from lib.model.ai_model import AIModel
 from lib.model.video_preprocessor import VideoPreprocessorModel
+from lib.server.api_definitions import AIModelInfo
+
+
+logger = logging.getLogger("logger")
 
 class ModelWrapper:
     def __init__(self, model, inputs, outputs):
@@ -79,11 +84,11 @@ class Pipeline:
         return None
     
     def get_ai_models_info(self):
-        ai_version_and_ids = []
+        ai_models_info = []
         for model in self.models:
             if isinstance(model.model.model, AIModel):
-                ai_version_and_ids.append((model.model.model.model_version, model.model.model.model_identifier, model.model.model.model_file_name, model.model.model.model_category))
-        return ai_version_and_ids
+                ai_models_info.append(AIModelInfo(name=model.model.model.model_file_name, identifier=model.model.model.model_identifier, version=model.model.model.model_version, categories=model.model.model.model_category, type=model.model.model.model_type))
+        return ai_models_info
 
 def validate_string_list(input_list):
     if not isinstance(input_list, list):

@@ -1,4 +1,4 @@
-active_pipelines: ["image_pipeline_dynamic", "video_pipeline_dynamic"]
+active_pipelines: ["image_pipeline_dynamic", "video_pipeline_dynamic", "video_pipeline_dynamic_v3", "image_pipeline_dynamic_v3"]
 default_image_pipeline: "image_pipeline_dynamic"
 default_video_pipeline: "video_pipeline_dynamic"
 loglevel: "INFO"

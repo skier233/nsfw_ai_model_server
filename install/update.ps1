@@ -7,7 +7,7 @@ function Get-LatestReleaseVersion {
 
 # Function to read the local version from config.yaml
 function Get-LocalVersion {
-    $configPath = "./config/version.yaml"
+    $configPath = "../config/version.yaml"
     $configContent = Get-Content $configPath -Raw
     if ($configContent -match 'VERSION:\s*(\S+)') {
         return $matches[1]
@@ -38,6 +38,12 @@ $configFilePath = Join-Path $tempDir "config\config.yaml"
 if (Test-Path $configFilePath) {
     Write-Host "Deleting config.yaml from temporary directory to preserve existing configuration"
     Remove-Item $configFilePath -Force
+}
+
+$activeFilePath = Join-Path $tempDir "config\active_ai.yaml"
+if (Test-Path $activeFilePath) {
+    Write-Host "Deleting active_ai.yaml from temporary directory to preserve existing configuration"
+    Remove-Item $activeFilePath -Force
 }
 
 Write-Host "Copying files to the current directory"

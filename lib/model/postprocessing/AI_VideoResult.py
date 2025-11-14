@@ -3,6 +3,8 @@ import logging
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 
+from lib.server.api_definitions import AIModelInfo
+
 logger = logging.getLogger("logger")
 
 class TagTimeFrame(BaseModel):
@@ -65,25 +67,25 @@ class AIVideoResult(BaseModel):
         return self.model_dump_json(exclude_none=True)
 
     def add_server_result(self, server_result):
-        ai_version_and_ids = server_result['ai_models_info']
+        model_infos = server_result['ai_models_info']
         updated_categories = set()
         current_models = self.metadata.models
 
         frame_interval = server_result['frame_interval']
         threshold = server_result['threshold']
-        for ai_version, ai_id, ai_filename, ai_categories in ai_version_and_ids:
-            for category in ai_categories:
+        for model_info in model_infos:
+            for category in model_info.categories:
                 if category in current_models:
                     model_info = current_models[category]
-                    if model_info.needs_reprocessed(frame_interval, threshold, ai_version, ai_id, ai_filename) > 0:
-                        current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=ai_version, ai_model_id=ai_id, file_name=ai_filename)
+                    if model_info.needs_reprocessed(frame_interval, threshold, model_info.version, model_info.identifier, model_info.name) > 0:
+                        current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.identifier, file_name=model_info.name)
                         updated_categories.add(category)
                 else:
-                    current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=ai_version, ai_model_id=ai_id, file_name=ai_filename)
+                    current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.identifier, file_name=model_info.name)
                     updated_categories.add(category)
 
         frames = server_result['frames']
-        timespans = AIVideoResult.__mutate_server_result_tags(frames, frame_interval)
+        timespans = AIVideoResult._mutate_server_result_tags(frames, frame_interval)
         logger.debug(f"Updated categories: {updated_categories}")
         for category in updated_categories:
             self.timespans[category] = timespans[category]
@@ -104,21 +106,20 @@ class AIVideoResult(BaseModel):
         frames = server_result['frames']
         video_duration = server_result['video_duration']
         frame_interval = server_result['frame_interval']
-        timespans = AIVideoResult.__mutate_server_result_tags(frames, frame_interval)
-        ai_version_and_ids = server_result['ai_models_info']
+        timespans = AIVideoResult._mutate_server_result_tags(frames, frame_interval)
+        model_infos = server_result['ai_models_info']
         modelinfos = {}
-        for ai_version, ai_id, ai_filename, ai_categories in ai_version_and_ids:
-            model_info = ModelInfo(frame_interval=frame_interval, threshold=server_result['threshold'], version=ai_version, ai_model_id=ai_id, file_name=ai_filename)
-            for category in ai_categories:
+        for model_info in model_infos:
+            for category in model_info.categories:
                 if category in modelinfos:
                     raise Exception(f"Category {category} already exists in modelinfos. Models should not have overlapping categories!")
-                modelinfos[category] = model_info
+                modelinfos[category] = ModelInfo(frame_interval=frame_interval, threshold=server_result['threshold'], version=model_info.version, ai_model_id=model_info.identifier, file_name=model_info.name)
         metadata = VideoMetadata(duration=video_duration, models=modelinfos)
         schema_version = 1
         return cls(schema_version=schema_version, metadata=metadata, timespans=timespans)
 
     @classmethod
-    def __mutate_server_result_tags(cls, frames, frame_interval):
+    def _mutate_server_result_tags(cls, frames, frame_interval, max_merge_seconds=0):
         toReturn = {}
         for frame in frames:
             frame_index = frame['frame_index']
@@ -146,13 +147,31 @@ class AIVideoResult(BaseModel):
                             last_time_frame = currentCategoryDict[tag_name][-1]
 
                             if last_time_frame.end is None:
-                                if frame_index - last_time_frame.start == frame_interval and last_time_frame.confidence == confidence:
+                                if frame_index - last_time_frame.start - frame_interval <= max_merge_seconds and last_time_frame.confidence == confidence:
                                     last_time_frame.end = frame_index
                                 else:
                                     currentCategoryDict[tag_name].append(TagTimeFrame(start=frame_index, end=None, confidence=confidence))
-                            elif last_time_frame.confidence == confidence and frame_index - last_time_frame.end == frame_interval:
+                            elif frame_index - last_time_frame.end - frame_interval <= max_merge_seconds and last_time_frame.confidence == confidence:
                                 last_time_frame.end = frame_index
                             else:
                                 currentCategoryDict[tag_name].append(TagTimeFrame(start=frame_index, end=None, confidence=confidence))
 
         return toReturn
+    
+
+
+class AIVideoResultV3(BaseModel):
+    schema_version: int
+    duration: float
+    models: List[AIModelInfo]
+    frame_interval: float
+    # category -> tag -> list of timeframes
+    timespans: Dict[str, Dict[str, List[TagTimeFrame]]]
+
+    def to_json(self):
+        return self.model_dump_json(exclude_none=True)
+    
+    @classmethod
+    def from_server_result(cls, server_result, max_merge_seconds=2):
+        timespans = AIVideoResult._mutate_server_result_tags(frames = server_result['frames'], frame_interval=server_result['frame_interval'], max_merge_seconds=max_merge_seconds)
+        return cls(schema_version=3, duration=server_result['video_duration'], models=server_result['models'], timespans=timespans, frame_interval=server_result['frame_interval'])

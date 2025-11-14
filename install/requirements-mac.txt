@@ -1,0 +1,6 @@
+# Mac (Apple Silicon M1/M2/M3 and Intel) requirements
+torch==2.7.0
+torchvision==0.22.0
+
+# Common dependencies
+-r requirements-base.txt

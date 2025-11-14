@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from lib.model.ai_model import AIModel
 from lib.model.skip_input import Skip
@@ -12,6 +13,12 @@ class ItemFuture:
         self.handler = event_handler
         self.future = asyncio.Future()
         self.data = {}
+        root_candidate = self._resolve_root_future(parent)
+        if root_candidate is None:
+            root_candidate = self
+        self.root_future = root_candidate
+        if self.root_future is self:
+            self._metrics_started_at = time.perf_counter()
     
     async def set_data(self, key, value):
         self.data[key] = value
@@ -43,6 +50,17 @@ class ItemFuture:
             await self.set_data(key, data[key])
         return self
 
+    @staticmethod
+    def _resolve_root_future(parent):
+        if parent is None:
+            return None
+        if isinstance(parent, ItemFuture):
+            return parent.root_future
+        parent_future = getattr(parent, "item_future", None)
+        if isinstance(parent_future, ItemFuture):
+            return parent_future.root_future
+        return None
+
 class QueueItem:
     def __init__(self, itemFuture, input_names, output_names):
         self.item_future = itemFuture
@@ -62,6 +80,7 @@ class ModelProcessor():
         self.workers_started = False
         self.failed_loading = False
         self.is_ai_model = isinstance(self.model, AIModel)
+        self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)
 
     def update_values_from_child_model(self):
         self.instance_count = self.model.instance_count
@@ -71,6 +90,7 @@ class ModelProcessor():
             self.queue = asyncio.Queue(maxsize=self.model.max_queue_size)
         self.max_batch_size = self.model.max_batch_size
         self.max_batch_waits = self.model.max_batch_waits
+        self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)
         
     async def add_to_queue(self, data):
         await self.queue.put(data)
@@ -98,24 +118,33 @@ class ModelProcessor():
         while True:
             firstItem = await self.queue.get()
             batch_data = []
-            if (await self.batch_data_append_with_skips(batch_data, firstItem)):
+            if await self.batch_data_append_with_skips(batch_data, firstItem):
+                self.queue.task_done()
                 continue
 
-            waitsSoFar = 0
-
             while len(batch_data) < self.max_batch_size:
-                if not self.queue.empty():
-                    await self.batch_data_append_with_skips(batch_data, await self.queue.get())
-                elif waitsSoFar < self.max_batch_waits:
-                    waitsSoFar += 1
-                    await asyncio.sleep(1)
-                else:
+                try:
+                    if self.batch_collect_timeout <= 0:
+                        next_item = self.queue.get_nowait()
+                    else:
+                        next_item = await asyncio.wait_for(self.queue.get(), timeout=self.batch_collect_timeout)
+                except asyncio.QueueEmpty:
                     break
+                except asyncio.TimeoutError:
+                    break
+
+                if await self.batch_data_append_with_skips(batch_data, next_item):
+                    self.queue.task_done()
+                    continue
             
             if len(batch_data) > 0:
-                try :
+                start_time = time.perf_counter() if self.is_ai_model else None
+                try:
                     await self.model.worker_function_wrapper(batch_data)
                 finally:
+                    if self.is_ai_model and start_time is not None:
+                        elapsed = time.perf_counter() - start_time
+                        self._record_ai_runtime(batch_data, elapsed)
                     for _ in batch_data:
                         self.queue.task_done()
 
@@ -134,3 +163,22 @@ class ModelProcessor():
             except Exception as e:
                 self.failed_loading = True
                 raise e
+
+    def _record_ai_runtime(self, batch_data, elapsed):
+        if elapsed <= 0:
+            return
+        root_counts = {}
+        for item in batch_data:
+            root_future = getattr(item.item_future, "root_future", None) or item.item_future
+            root_counts[root_future] = root_counts.get(root_future, 0) + 1
+
+        total_items = sum(root_counts.values())
+        if total_items == 0:
+            return
+
+        for root_future, count in root_counts.items():
+            metrics = getattr(root_future, "_pipeline_metrics", None)
+            if metrics is None:
+                metrics = {}
+                setattr(root_future, "_pipeline_metrics", metrics)
+            metrics["ai_inference_seconds"] = metrics.get("ai_inference_seconds", 0.0) + (elapsed * (count / total_items))

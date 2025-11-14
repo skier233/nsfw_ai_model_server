@@ -1,0 +1,6 @@
+# Intel GPU requirements (Linux with Intel Extension for PyTorch)
+# Note: Intel Extension for PyTorch and related dependencies should be added here
+# TODO: Add intel-extension-for-pytorch and oneccl_bind_pt
+
+# Common dependencies
+-r requirements-base.txt

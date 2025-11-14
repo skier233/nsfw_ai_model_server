@@ -1,5 +1,6 @@
 use_category_image_thresholds: true
 reprocess_with_more_accurate_same_model: false
+max_timespan_merge_seconds: 4
 csv_defaults:
     MinMarkerDuration: 12
     MaxGap: 6

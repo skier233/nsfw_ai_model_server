@@ -14,7 +14,7 @@ get_latest_release_version() {
 
 # Function to read the local version from config.yaml
 get_local_version() {
-    configPath="./config/version.yaml"
+    configPath="../config/version.yaml"
     if [[ -f "$configPath" ]]; then
         localVersion=$(grep 'VERSION:' $configPath | awk '{print $2}')
         echo $localVersion
@@ -49,6 +49,12 @@ configFilePath="$tempDir/config/config.yaml"
 if [ -f "$configFilePath" ]; then
     echo "Deleting config.yaml from temporary directory to preserve existing configuration"
     rm -f "$configFilePath"
+fi
+
+activeFilePath="$tempDir/config/active_ai.yaml"
+if [ -f "$activeFilePath" ]; then
+    echo "Deleting active_ai.yaml from temporary directory to preserve existing configuration"
+    rm -f "$activeFilePath"
 fi
 
 echo "Copying files to the current directory"

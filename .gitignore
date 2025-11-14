@@ -10,7 +10,6 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -159,3 +158,28 @@ cython_debug/
 TODO.txt
 *.zip
 /temp
+/temp2
+nsfw_ai_model_server/
+/config/models/*
+models/.ai_license_fingerprint
+
+# Docker
+docker_*.log
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Release directories
+*_release/
+*_release.zip
+
+# Build artifacts
+nv-codec-headers/
+
+# Logs
+logs/
+*.log
+
+/github wiki/

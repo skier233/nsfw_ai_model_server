@@ -19,6 +19,19 @@ class VideoPathList(BaseModel):
     vr_video: bool = False
     existing_json_data: Any = None
 
+class VideoRequestV3(BaseModel):
+    path: str
+    categories_to_skip: List[str] = None
+    frame_interval: float = None
+    threshold: float = None
+    vr_video: bool = False
+    categories_to_skip: List[str] = None
+
+class ImageRequestV3(BaseModel):
+    paths: List[str]
+    threshold: float = None
+    return_confidence: bool = None
+
 class OptimizeMarkerSettings(BaseModel):
     existing_json_data: Any = None
     desired_timespan_data: Any = None
@@ -28,3 +41,11 @@ class VideoResult(BaseModel):
 
 class ImageResult(BaseModel):
     result: Any
+    models: List[Any] | None = None
+
+class AIModelInfo(BaseModel):
+    name: str
+    identifier: int
+    version: float
+    categories: List[str]
+    type: str

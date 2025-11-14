@@ -6,6 +6,6 @@ dependencies:
   - pip
   - pip:
     - -r requirements.txt
-    - ./dist/ai_processing-0.0.0-cp312-cp312-win_amd64.whl  # [win]
+    - ../dist/ai_processing-0.0.0-cp312-cp312-win_amd64.whl  # [win]
     - wmi
     - windows-curses
