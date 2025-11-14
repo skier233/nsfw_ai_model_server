@@ -1,7 +1,6 @@
 services:
   nsfw-ai-server:
-    image: ghcr.io/skier233/nsfw_ai_model_server:nvidia  # NVIDIA build (default)
-    # image: ghcr.io/skier233/nsfw_ai_model_server:intel  # Intel Arc build (uncomment to use)
+    image: ai_model_server
     container_name: nsfw-ai-server
     restart: unless-stopped
     

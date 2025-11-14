@@ -71,6 +71,10 @@ pip uninstall ai-processing -y
 if [ "$1" = '--amd' ]; then
     conda env update --file ./environment-linux-amd.yml
     source ./install-amd-post.sh
+elif [ "$1" = '--intel' ]; then
+    conda env update --file ./environment-linux-intel.yml
+elif [ "$1" = '--mac' ]; then
+    conda env update --file ./environment-mac.yml
 else
     conda env update --file ./environment-linux.yml
 fi
