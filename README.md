@@ -31,7 +31,7 @@ Before becoming a patron or installing the free model, please be aware of the fo
 
 - **Usage Restrictions**: This code and associated models can only be used for personal local use as per the license. For any for-profit use cases or use cases that require online deployment, [please contact](https://discord.gg/EvYbZBf) me for licensing options.
 
-- **Hardware Requirements**: Only NVIDIA GPUs are supported. Any NVIDIA GPUs older than the NVIDIA 1080 will likely not work. Support for AMD GPUs is not planned.
+- **Hardware Requirements**: NVIDIA GPUs are fully supported. Any NVIDIA GPUs older than the NVIDIA 1080 will likely not work. AMD, Intel, and MacOS are supported in Beta. These configurations have limited users so far and may encounter issues
 
 - **Performance on CPU**: While CPU is supported, it will be much slower compared to running on a GPU.
 
