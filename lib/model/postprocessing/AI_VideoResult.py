@@ -77,11 +77,11 @@ class AIVideoResult(BaseModel):
             for category in model_info.categories:
                 if category in current_models:
                     model_info = current_models[category]
-                    if model_info.needs_reprocessed(frame_interval, threshold, model_info.version, model_info.ai_model_id, model_info.file_name) > 0:
-                        current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.ai_model_id, file_name=model_info.file_name)
+                    if model_info.needs_reprocessed(frame_interval, threshold, model_info.version, model_info.identifier, model_info.name) > 0:
+                        current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.identifier, file_name=model_info.name)
                         updated_categories.add(category)
                 else:
-                    current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.ai_model_id, file_name=model_info.file_name)
+                    current_models[category] = ModelInfo(frame_interval=frame_interval, threshold=threshold, version=model_info.version, ai_model_id=model_info.identifier, file_name=model_info.name)
                     updated_categories.add(category)
 
         frames = server_result['frames']
