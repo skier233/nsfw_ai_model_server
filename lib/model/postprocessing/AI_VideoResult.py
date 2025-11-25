@@ -49,7 +49,7 @@ class ModelInfo(BaseModel):
 
 
     def __str__(self):
-        return f"ModelInfo(frame_interval={self.frame_interval}, threshold={self.threshold}, version={self.version}, ai_model_id={self.model_id}, file_name={self.file_name})"
+        return f"ModelInfo(frame_interval={self.frame_interval}, threshold={self.threshold}, version={self.version}, ai_model_id={self.ai_model_id}, file_name={self.file_name})"
 
 class VideoMetadata(BaseModel):
     duration: float
