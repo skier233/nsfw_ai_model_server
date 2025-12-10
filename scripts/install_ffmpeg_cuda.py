@@ -41,7 +41,7 @@ USER_AGENT = "nsfw-ai-model-server-ffmpeg-installer"
 # Set PREFERRED_RELEASE_TAG to force the script to fetch a specific release tag
 # from the BtbN autobuilds (for example, "autobuild-2025-08-31-13-00"). Set to
 # None to follow the project's latest release.
-PREFERRED_RELEASE_TAG: str | None = "autobuild-2025-10-07-13-32"
+PREFERRED_RELEASE_TAG: str | None = None
 
 # Set PREFERRED_FFMPEG_VERSION to filter assets by version token within their
 # filename (for example, "6.1" to pick FFmpeg 6.1.x builds). Set to None to
