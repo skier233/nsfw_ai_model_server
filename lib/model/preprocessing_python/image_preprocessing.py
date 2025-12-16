@@ -11,7 +11,7 @@ import torch
 from torchvision.transforms import v2 as transforms
 from torchvision.transforms.functional import InterpolationMode
 from torchvision.transforms.functional import pil_to_tensor
-from torchvision.io import decode_image
+from torchvision.io import decode_image, ImageReadMode
 import torchvision
 import numpy as np
 from deffcode import Sourcer
@@ -78,19 +78,40 @@ def _load_image_with_pillow(image_path: str) -> torch.Tensor:
             img.seek(middle_index)
         frame = img.convert("RGB")
         tensor = pil_to_tensor(frame)
-    return tensor
+    return _ensure_rgb_channels(tensor, image_path)
 
 
 def _load_image_tensor(image_path: str) -> torch.Tensor:
     if _is_rocm_build():
         return _load_image_with_pillow(image_path)
 
-    tensor = decode_image(image_path)
+    tensor = decode_image(image_path, mode=ImageReadMode.RGB)
     if tensor.ndim == 4:
         frame_count = tensor.shape[0]
         middle_index = frame_count // 2
         tensor = tensor[middle_index]
-    return tensor
+    return _ensure_rgb_channels(tensor, image_path)
+
+
+def _ensure_rgb_channels(tensor: torch.Tensor, image_path: str) -> torch.Tensor:
+    if tensor.ndim < 3:
+        raise DimensionError(
+            f"Invalid Image: Unable to decode '{image_path}' into a 3-channel tensor; got shape {tuple(tensor.shape)}."
+        )
+
+    channel_count = tensor.shape[0]
+    if channel_count == 3:
+        return tensor
+
+    if channel_count == 1:
+        return tensor.repeat(3, 1, 1)
+
+    if channel_count >= 4:
+        return tensor[:3]
+
+    raise DimensionError(
+        f"Invalid Image: Unsupported channel count ({channel_count}) for '{image_path}'."
+    )
 
 def get_normalization_config(index, device):
     normalization_configs = [
