@@ -1,11 +1,13 @@
+import io
 import json
 import logging
 import os
 import queue
 import re
 import threading
+import zipfile
 from contextlib import suppress
-from typing import Optional
+from typing import IO, Optional
 
 import torch
 from torchvision.transforms import v2 as transforms
@@ -65,13 +67,66 @@ def _get_deffcode_decoder():
 _ensure_deffcode_log_filter()
 
 
+_ZIP_PATH_PATTERN = re.compile(r"\.zip(?=$|[\\/])", re.IGNORECASE)
+
+
 def _is_rocm_build() -> bool:
     return bool(getattr(torch.version, "hip", None))
 
 
-def _load_image_with_pillow(image_path: str) -> torch.Tensor:
+def _split_zip_archive_path(path: str) -> Optional[tuple[str, str]]:
+    match = _ZIP_PATH_PATTERN.search(path)
+    if not match:
+        return None
+    archive_path = path[: match.end()]
+    inner_path = path[match.end() :].lstrip("\\/")
+    if not inner_path:
+        raise DimensionError(
+            f"Invalid Image Path: '{path}' points to a zip archive but no inner file was specified."
+        )
+    return archive_path, inner_path
+
+
+def _normalized_zip_member_path(member_path: str) -> str:
+    candidate = member_path.replace("\\", "/")
+    return candidate.lstrip("/")
+
+
+def _load_image_from_zip(archive_path: str, member_path: str) -> torch.Tensor:
+    normalized_member = _normalized_zip_member_path(member_path)
+    if not os.path.exists(archive_path):
+        raise FileNotFoundError(f"Zip archive '{archive_path}' does not exist.")
+
+    with zipfile.ZipFile(archive_path) as archive:
+        try:
+            with archive.open(normalized_member) as member_file:
+                payload = member_file.read()
+        except KeyError as exc:
+            raise FileNotFoundError(
+                f"File '{normalized_member}' not found inside archive '{archive_path}'."
+            ) from exc
+
+    stream = io.BytesIO(payload)
+    pseudo_path = f"{archive_path}!{normalized_member}"
+
+    if _is_rocm_build():
+        return _load_image_with_pillow(pseudo_path, file_obj=stream)
+
+    byte_tensor = torch.frombuffer(memoryview(payload), dtype=torch.uint8).clone()
+    decoded = decode_image(byte_tensor, mode=ImageReadMode.RGB)
+    return _finalize_decoded_tensor(decoded, pseudo_path)
+
+
+def _load_image_with_pillow(image_path: str, *, file_obj: Optional[IO[bytes]] = None) -> torch.Tensor:
     from PIL import Image
-    with Image.open(image_path) as img:
+
+    if file_obj is not None:
+        file_obj.seek(0)
+        image_source = file_obj
+    else:
+        image_source = image_path
+
+    with Image.open(image_source) as img:
         if getattr(img, "is_animated", False):
             frame_count = getattr(img, "n_frames", 1)
             middle_index = max(frame_count // 2, 0)
@@ -82,15 +137,16 @@ def _load_image_with_pillow(image_path: str) -> torch.Tensor:
 
 
 def _load_image_tensor(image_path: str) -> torch.Tensor:
+    archive_parts = _split_zip_archive_path(image_path)
+    if archive_parts is not None:
+        archive_path, member_path = archive_parts
+        return _load_image_from_zip(archive_path, member_path)
+
     if _is_rocm_build():
         return _load_image_with_pillow(image_path)
 
     tensor = decode_image(image_path, mode=ImageReadMode.RGB)
-    if tensor.ndim == 4:
-        frame_count = tensor.shape[0]
-        middle_index = frame_count // 2
-        tensor = tensor[middle_index]
-    return _ensure_rgb_channels(tensor, image_path)
+    return _finalize_decoded_tensor(tensor, image_path)
 
 
 def _ensure_rgb_channels(tensor: torch.Tensor, image_path: str) -> torch.Tensor:
@@ -112,6 +168,14 @@ def _ensure_rgb_channels(tensor: torch.Tensor, image_path: str) -> torch.Tensor:
     raise DimensionError(
         f"Invalid Image: Unsupported channel count ({channel_count}) for '{image_path}'."
     )
+
+
+def _finalize_decoded_tensor(tensor: torch.Tensor, image_path: str) -> torch.Tensor:
+    if tensor.ndim == 4:
+        frame_count = tensor.shape[0]
+        middle_index = frame_count // 2
+        tensor = tensor[middle_index]
+    return _ensure_rgb_channels(tensor, image_path)
 
 def get_normalization_config(index, device):
     normalization_configs = [
