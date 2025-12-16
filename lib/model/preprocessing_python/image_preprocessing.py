@@ -10,7 +10,8 @@ from typing import Optional
 import torch
 from torchvision.transforms import v2 as transforms
 from torchvision.transforms.functional import InterpolationMode
-from torchvision.io import read_image
+from torchvision.transforms.functional import pil_to_tensor
+from torchvision.io import decode_image
 import torchvision
 import numpy as np
 from deffcode import Sourcer
@@ -62,6 +63,34 @@ def _get_deffcode_decoder():
 
 
 _ensure_deffcode_log_filter()
+
+
+def _is_rocm_build() -> bool:
+    return bool(getattr(torch.version, "hip", None))
+
+
+def _load_image_with_pillow(image_path: str) -> torch.Tensor:
+    from PIL import Image
+    with Image.open(image_path) as img:
+        if getattr(img, "is_animated", False):
+            frame_count = getattr(img, "n_frames", 1)
+            middle_index = max(frame_count // 2, 0)
+            img.seek(middle_index)
+        frame = img.convert("RGB")
+        tensor = pil_to_tensor(frame)
+    return tensor
+
+
+def _load_image_tensor(image_path: str) -> torch.Tensor:
+    if _is_rocm_build():
+        return _load_image_with_pillow(image_path)
+
+    tensor = decode_image(image_path)
+    if tensor.ndim == 4:
+        frame_count = tensor.shape[0]
+        middle_index = frame_count // 2
+        tensor = tensor[middle_index]
+    return tensor
 
 def get_normalization_config(index, device):
     normalization_configs = [
@@ -206,13 +235,8 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
         apply_resize=True,
     )
 
-    # Read image using torchvision (returns a tensor). Handle animated sources (e.g., GIFs)
-    # by selecting the middle frame prior to further processing.
-    img = read_image(image_path)
-    if img.ndim == 4:
-        frame_count = img.shape[0]
-        middle_index = frame_count // 2
-        img = img[middle_index]
+    # Read image via torchvision unless running on ROCm, where Pillow is needed for JPEGs.
+    img = _load_image_tensor(image_path)
     # Move to target device and run transforms
     img = img.to(device)
     out = frame_transforms(img)
