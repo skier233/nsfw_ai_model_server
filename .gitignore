@@ -182,4 +182,11 @@ nv-codec-headers/
 logs/
 *.log
 
+# Development files
+dev_server.py
+start-dev.ps1
+
+# User-specific configuration
+config/active_ai.yaml
+
 /github wiki/

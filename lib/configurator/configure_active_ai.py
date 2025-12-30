@@ -1,12 +1,29 @@
 import os
 import yaml
 import curses
+import shutil
 
 # Static file paths
 active_ai_yaml_path = "./config/active_ai.yaml"
+active_ai_yaml_example = "./config/active_ai.yaml.example"
 ai_models_directory = "./config/models"
 
+def _ensure_active_ai_config():
+    """Ensure active_ai.yaml exists by copying from example if needed."""
+    if not os.path.exists(active_ai_yaml_path):
+        if os.path.exists(active_ai_yaml_example):
+            shutil.copy2(active_ai_yaml_example, active_ai_yaml_path)
+        else:
+            # Fallback: create a minimal default config
+            default_config = {
+                'active_ai_models': ['gentler_river', 'stilted_glade', 'fearless_terrain']
+            }
+            os.makedirs(os.path.dirname(active_ai_yaml_path), exist_ok=True)
+            with open(active_ai_yaml_path, 'w') as f:
+                yaml.dump(default_config, f, default_flow_style=False)
+
 def load_active_ai_models():
+    _ensure_active_ai_config()
     with open(active_ai_yaml_path, 'r') as f:
         data = yaml.safe_load(f)
     return data.get('active_ai_models', []) or []
