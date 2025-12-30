@@ -88,6 +88,10 @@ async def process_video_v3(request: VideoRequestV3):
         result = None
         try:
             future = await server_manager.get_request_future(data, pipeline_name)
+            # Store excluded_tags in the future data if provided
+            excluded_tags = request.excluded_tags if request.excluded_tags else []
+            # Always set it, even if empty, to ensure consistent behavior
+            await future.set_data("excluded_tags", excluded_tags)
             result = await future
             logger.debug(f"Video v3 processing result: {result}")
         except Exception as e:
@@ -111,8 +115,8 @@ async def process_images_v3(request: ImageRequestV3):
         for path in image_paths:
             future = await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name)
             # Store excluded_tags in the future data so postprocessor can access it
-            if excluded_tags:
-                await future.set_data("excluded_tags", excluded_tags)
+            # Always set it, even if empty, to ensure consistent behavior
+            await future.set_data("excluded_tags", excluded_tags)
             futures.append(future)
         results = await asyncio.gather(*futures, return_exceptions=True)
 
@@ -334,15 +338,42 @@ async def get_available_tags():
                                 "tagCount": len(model_tags_sorted)
                             }
         
-        # Convert dict to list
+        # Convert dict to list and mark all as active (since they're loaded)
         models_data = list(models_dict.values())
+        for model in models_data:
+            model["active"] = True
+        
+        # Get list of all available models (including inactive ones) for comparison
+        from lib.configurator.configure_active_ai import load_available_ai_models, load_active_ai_models
+        all_available_models = load_available_ai_models()
+        active_model_names = set(load_active_ai_models())
+        
+        # Add inactive models to the response (without tags, but with metadata)
+        active_model_names_in_response = {m["name"] for m in models_data}
+        for available_model in all_available_models:
+            model_name = available_model.get('yaml_file_name', '')
+            if model_name and model_name not in active_model_names_in_response:
+                # This model exists but is not active
+                model_categories = available_model.get('model_category', [])
+                # Generate a display name from the model name
+                display_name = model_name.replace('_', ' ').title()
+                models_data.append({
+                    "name": model_name,
+                    "displayName": display_name,  # Add display name for frontend
+                    "identifier": available_model.get('model_identifier'),
+                    "version": available_model.get('model_version'),
+                    "categories": model_categories,
+                    "tags": [],  # No tags since model is not loaded
+                    "tagCount": 0,
+                    "active": False
+                })
         
         # Return both: all unique tags (for backward compatibility) and tags by model
         all_tags_list = sorted(list(all_tags_set))
-        logger.debug(f"Returning {len(all_tags_list)} unique tags across {len(models_data)} models")
+        logger.debug(f"Returning {len(all_tags_list)} unique tags across {len([m for m in models_data if m.get('active')])} active models, {len(models_data)} total models")
         result = {
             "tags": all_tags_list,  # Backward compatibility
-            "models": models_data    # New: tags grouped by model
+            "models": models_data    # New: tags grouped by model, includes active/inactive status
         }
         return result
     except Exception as e:

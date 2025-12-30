@@ -1,4 +1,6 @@
 import logging
+import os
+import shutil
 from lib.config.config_utils import load_config
 from lib.model.ai_model import AIModel
 from lib.pipeline.pipeline import ModelWrapper
@@ -7,12 +9,35 @@ from lib.server.exceptions import NoActiveModelsException
 
 
 ai_active_directory = "./config/active_ai.yaml"
+ai_active_example = "./config/active_ai.yaml.example"
+
+
+def _ensure_active_ai_config():
+    """Ensure active_ai.yaml exists by copying from example if needed."""
+    if not os.path.exists(ai_active_directory):
+        if os.path.exists(ai_active_example):
+            shutil.copy2(ai_active_example, ai_active_directory)
+            logger = logging.getLogger("logger")
+            logger.info(f"Created {ai_active_directory} from {ai_active_example}")
+        else:
+            # Fallback: create a minimal default config
+            import yaml
+            default_config = {
+                'active_ai_models': ['gentler_river', 'stilted_glade', 'fearless_terrain']
+            }
+            os.makedirs(os.path.dirname(ai_active_directory), exist_ok=True)
+            with open(ai_active_directory, 'w') as f:
+                yaml.dump(default_config, f, default_flow_style=False)
+            logger = logging.getLogger("logger")
+            logger.warning(f"Created default {ai_active_directory} (example file not found)")
 
 
 
 class DynamicAIManager:
     def __init__(self, model_manager):
         self.model_manager = model_manager
+        # Ensure config file exists before loading
+        _ensure_active_ai_config()
         self.configfile = load_config(ai_active_directory)
         self.ai_model_names = self.configfile.get("active_ai_models", [])
         self.loaded = False

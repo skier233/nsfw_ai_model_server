@@ -186,4 +186,7 @@ logs/
 dev_server.py
 start-dev.ps1
 
+# User-specific configuration
+config/active_ai.yaml
+
 /github wiki/
