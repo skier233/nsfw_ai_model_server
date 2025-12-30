@@ -182,4 +182,8 @@ nv-codec-headers/
 logs/
 *.log
 
+# Development files
+dev_server.py
+start-dev.ps1
+
 /github wiki/

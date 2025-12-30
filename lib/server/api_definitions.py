@@ -31,6 +31,7 @@ class ImageRequestV3(BaseModel):
     paths: List[str]
     threshold: float = None
     return_confidence: bool = None
+    excluded_tags: List[str] = None
 
 class OptimizeMarkerSettings(BaseModel):
     existing_json_data: Any = None

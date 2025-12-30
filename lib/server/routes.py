@@ -106,7 +106,14 @@ async def process_images_v3(request: ImageRequestV3):
         logger.info(f"Processing {len(image_paths)} images")
         pipeline_name = "image_pipeline_dynamic_v3"
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
-        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
+        excluded_tags = request.excluded_tags if request.excluded_tags else []
+        futures = []
+        for path in image_paths:
+            future = await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name)
+            # Store excluded_tags in the future data so postprocessor can access it
+            if excluded_tags:
+                await future.set_data("excluded_tags", excluded_tags)
+            futures.append(future)
         results = await asyncio.gather(*futures, return_exceptions=True)
 
         aggregate_metrics = {
@@ -275,3 +282,70 @@ async def ready_check():
     except Exception as e:
         logger.error(f"Readiness check error: {e}")
         raise HTTPException(status_code=503, detail=str(e))
+
+@app.get("/tags/available")
+async def get_available_tags():
+    """Returns tags grouped by model from all active AI models."""
+    try:
+        from lib.model.ai_model import AIModel
+        models_dict = {}  # Use dict to deduplicate by model name
+        all_tags_set = set()
+        
+        pipelines = server_manager.pipeline_manager.pipelines
+        if not pipelines:
+            return {"tags": [], "models": []}
+        
+        for pipeline_name, pipeline in pipelines.items():
+            for model_wrapper in pipeline.models:
+                if isinstance(model_wrapper.model.model, AIModel):
+                    ai_model = model_wrapper.model.model
+                    # Check if tags are loaded (they should be after model.load() is called)
+                    if hasattr(ai_model, 'tags') and ai_model.tags:
+                        # tags is a dict mapping index -> tag_name
+                        model_tags = [tag_name for tag_name in ai_model.tags.values()]
+                        model_tags_sorted = sorted(model_tags)
+                        
+                        # Add to all tags set
+                        all_tags_set.update(model_tags)
+                        
+                        # Get model info
+                        model_name = ai_model.model_file_name
+                        
+                        # Deduplicate: if we've seen this model before, merge tags (in case same model in multiple pipelines)
+                        if model_name in models_dict:
+                            # Merge tags and keep unique
+                            existing_tags = set(models_dict[model_name]["tags"])
+                            new_tags = set(model_tags_sorted)
+                            merged_tags = sorted(list(existing_tags | new_tags))
+                            models_dict[model_name]["tags"] = merged_tags
+                            models_dict[model_name]["tagCount"] = len(merged_tags)
+                        else:
+                            # First time seeing this model
+                            model_categories = ai_model.model_category or []
+                            model_identifier = ai_model.model_identifier
+                            model_version = ai_model.model_version
+                            
+                            models_dict[model_name] = {
+                                "name": model_name,
+                                "identifier": model_identifier,
+                                "version": model_version,
+                                "categories": model_categories,
+                                "tags": model_tags_sorted,
+                                "tagCount": len(model_tags_sorted)
+                            }
+        
+        # Convert dict to list
+        models_data = list(models_dict.values())
+        
+        # Return both: all unique tags (for backward compatibility) and tags by model
+        all_tags_list = sorted(list(all_tags_set))
+        logger.debug(f"Returning {len(all_tags_list)} unique tags across {len(models_data)} models")
+        result = {
+            "tags": all_tags_list,  # Backward compatibility
+            "models": models_data    # New: tags grouped by model
+        }
+        return result
+    except Exception as e:
+        logger.error(f"Error getting available tags: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

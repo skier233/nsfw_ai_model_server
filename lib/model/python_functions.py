@@ -137,6 +137,8 @@ async def image_result_postprocessor_v3(data):
         itemFuture = item.item_future
         pipeline = itemFuture['pipeline']
         result = itemFuture[item.input_names[0]]
+        excluded_tags = itemFuture.get("excluded_tags") or []
+        excluded_set = set(excluded_tags) if excluded_tags else set()
         toReturn = {}
         for category, tags in result.items():
             if category not in category_config:
@@ -148,8 +150,12 @@ async def image_result_postprocessor_v3(data):
                     if tagname not in category_config[category]:
                         continue
                     
-                    tag_threshold = float(get_or_default(category_config[category][tagname], 'TagThreshold', 0.5))
+                    # Check if tag is excluded (compare both original and renamed tag)
                     renamed_tag = category_config[category][tagname]['RenamedTag']
+                    if tagname in excluded_set or renamed_tag in excluded_set:
+                        continue
+                    
+                    tag_threshold = float(get_or_default(category_config[category][tagname], 'TagThreshold', 0.5))
 
                     if not post_processing_config["use_category_image_thresholds"]:
                         toReturn[category].append((renamed_tag, confidence))
@@ -159,6 +165,9 @@ async def image_result_postprocessor_v3(data):
                     if tag not in category_config[category]:
                         continue
                     renamed_tag = category_config[category][tag]['RenamedTag']
+                    # Check if tag is excluded (compare both original and renamed tag)
+                    if tag in excluded_set or renamed_tag in excluded_set:
+                        continue
                     toReturn[category].append(renamed_tag)
 
         root_future = getattr(itemFuture, "root_future", itemFuture)
