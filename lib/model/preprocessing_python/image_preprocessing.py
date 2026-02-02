@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - optional dependency
 _DEFFCODE_LOG_SUPPRESSIONS = (
     "Manually discarding `frame_format`",
     "Manually discarding `-size/-s`",
+    "Manually discarding `-framerate/-r`",
     "Manually disabling `-framerate/-r`",
     "No usable pixel-format defined. Switching to default",
     "Pipeline terminated successfully.",
