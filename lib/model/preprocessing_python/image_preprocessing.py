@@ -4,10 +4,12 @@ import logging
 import os
 import queue
 import re
+import shutil
+import subprocess
 import threading
 import zipfile
 from contextlib import suppress
-from typing import IO, Optional
+from typing import IO, Optional, Tuple
 
 import torch
 from torchvision.transforms import v2 as transforms
@@ -504,6 +506,58 @@ def _format_ffmpeg_float(value: float) -> str:
     return text
 
 
+def _probe_video_resolution_ffprobe(video_path: str) -> Optional[Tuple[int, int]]:
+    """
+    Probe video resolution using ffprobe directly with robust encoding handling.
+
+    This function handles videos with non-UTF-8 metadata (e.g., Japanese comments)
+    by using errors='replace' when decoding ffprobe output.
+
+    Returns:
+        Tuple of (width, height) if successful, None otherwise.
+    """
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                video_path,
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+
+        # Decode with errors='replace' to handle non-UTF-8 metadata
+        stdout_text = result.stdout.decode("utf-8", errors="replace")
+
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(stdout_text)
+        streams = data.get("streams", [])
+        if not streams:
+            return None
+
+        stream = streams[0]
+        width = stream.get("width")
+        height = stream.get("height")
+
+        if width is not None and height is not None:
+            return (int(width), int(height))
+
+        return None
+    except Exception as exc:
+        _LOGGER.debug("ffprobe resolution probe failed: %s", exc)
+        return None
+
+
 _DEFFCODE_HW_DECODER_MAP = {
     "h264": "h264_cuvid",
     "avc": "h264_cuvid",
@@ -571,41 +625,63 @@ def preprocess_video_deffcode_auto(
     
     # Determine if GPU preprocessing should be used based on resolution
     if target_device.type == 'cuda':
+        width, height = 0, 0
+        probe_succeeded = False
+
+        # First, try deffcode's Sourcer API
         try:
-            # Probe video metadata to check resolution using the higher-level Sourcer API
             sourcer = Sourcer(video_path).probe_stream()
             try:
                 metadata = sourcer.retrieve_metadata()
-
                 width = metadata.get("source_video_resolution", [0, 0])[0]
                 height = metadata.get("source_video_resolution", [0, 0])[1]
-
-                # Use GPU preprocessing for 4K+ videos (with small margin for non-standard resolutions)
-                # 4K is typically 3840x2160, so we check for >= 3600 width or >= 1900 height
-                if width >= 3600 or height >= 1900:
-                    use_gpu_preprocessing = True
-                    _LOGGER.debug(
-                        "Video resolution %dx%d qualifies for GPU preprocessing",
-                        width,
-                        height,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Video resolution %dx%d will use CPU preprocessing to avoid GPU contention",
-                        width,
-                        height,
-                    )
+                probe_succeeded = True
             finally:
                 terminate = getattr(sourcer, "terminate", None)
                 if callable(terminate):
                     terminate()
         except Exception as exc:
-            _LOGGER.warning(
-                "Failed to probe video resolution for '%s': %s. Defaulting to CPU preprocessing.",
+            # Sourcer can fail on certain videos (non-UTF-8 metadata, problematic containers, etc.)
+            _LOGGER.debug(
+                "Sourcer probe failed for '%s': %s. Trying direct ffprobe fallback.",
                 video_path,
                 exc,
             )
-            use_gpu_preprocessing = False
+
+        # Fallback: probe directly with ffprobe using robust encoding handling
+        if not probe_succeeded:
+            resolution = _probe_video_resolution_ffprobe(video_path)
+            if resolution:
+                width, height = resolution
+                probe_succeeded = True
+                _LOGGER.debug(
+                    "ffprobe fallback succeeded for '%s': %dx%d",
+                    video_path,
+                    width,
+                    height,
+                )
+            else:
+                _LOGGER.warning(
+                    "Failed to probe video resolution for '%s'. Defaulting to CPU preprocessing.",
+                    video_path,
+                )
+
+        # Use GPU preprocessing for 4K+ videos (with small margin for non-standard resolutions)
+        # 4K is typically 3840x2160, so we check for >= 3600 width or >= 1900 height
+        if probe_succeeded and (width >= 3600 or height >= 1900):
+            use_gpu_preprocessing = True
+            _LOGGER.debug(
+                "Video resolution %dx%d qualifies for GPU preprocessing",
+                width,
+                height,
+            )
+        elif probe_succeeded:
+            _LOGGER.debug(
+                "Video resolution %dx%d will use CPU preprocessing to avoid GPU contention",
+                width,
+                height,
+            )
+
 
     # Try GPU preprocessing if determined appropriate
     if use_gpu_preprocessing:
