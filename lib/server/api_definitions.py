@@ -45,7 +45,9 @@ class ImageResult(BaseModel):
 
 class AIModelInfo(BaseModel):
     name: str
-    identifier: int
-    version: float
-    categories: List[str]
+    identifier: int | None = None
+    version: float | None = None
+    categories: List[str] | None = None
     type: str
+    capabilities: List[str] | None = None
+    supported_scopes: List[str] | None = None

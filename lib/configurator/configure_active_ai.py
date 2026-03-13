@@ -12,8 +12,13 @@ def load_active_ai_models():
     return data.get('active_ai_models', []) or []
 
 def save_active_ai_models(active_ai_models):
+    existing = {}
+    if os.path.exists(active_ai_yaml_path):
+        with open(active_ai_yaml_path, 'r') as f:
+            existing = yaml.safe_load(f) or {}
+    existing['active_ai_models'] = active_ai_models
     with open(active_ai_yaml_path, 'w') as f:
-        yaml.dump({'active_ai_models': active_ai_models}, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
 
 def load_available_ai_models():
     models = []

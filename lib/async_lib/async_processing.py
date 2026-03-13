@@ -21,6 +21,8 @@ class ItemFuture:
             self._metrics_started_at = time.perf_counter()
     
     async def set_data(self, key, value):
+        if self.data is None or self.future.done():
+            return
         self.data[key] = value
         await self.handler(self, key)
 
@@ -28,14 +30,20 @@ class ItemFuture:
         await self.set_data(key, value)
 
     def close_future(self, value):
+        if self.future.done():
+            return
         self.data = None
         self.future.set_result(value)
 
     def set_exception(self, exception):
+        if self.future.done():
+            return
         self.data = None
         self.future.set_exception(exception)
     
     def __getitem__(self, key):
+        if self.data is None:
+            return None
         return self.data.get(key)
 
     def __await__(self):

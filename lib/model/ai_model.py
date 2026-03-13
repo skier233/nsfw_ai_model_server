@@ -2,9 +2,17 @@
 import logging
 import time
 import torch
+import torch.nn.functional as F
+from typing import Iterable, List
 from lib.model.model import Model
 from lib.model.ai_model_python.python_model import PythonModel
 from lib.utils.torch_device_selector import get_device_string
+
+
+DEFAULT_MODEL_CAPABILITY = "tagging"
+DEFAULT_SUPPORTED_TARGET_SCOPES = ["asset", "frame", "region"]
+VALID_MODEL_CAPABILITIES = {"tagging", "detection", "embedding"}
+VALID_TARGET_SCOPES = {"asset", "frame", "region"}
 
 class AIModel(Model):
     def __init__(self, configValues):
@@ -19,12 +27,14 @@ class AIModel(Model):
         self.device = configValues.get("device", None)
         self.fill_to_batch = configValues.get("fill_to_batch_size", True)
         self.model_image_size = configValues.get("model_image_size", None)
-        self.model_category = configValues.get("model_category", None)
-        self.model_type = "ImClass"
+        self.model_category = _normalize_string_list(configValues.get("model_category", None))
+        self.model_type = configValues.get("model_type", "ImClass")
         self.model_version = configValues.get("model_version", None)
         self.model_identifier = configValues.get("model_identifier", None)
         self.category_mappings = configValues.get("category_mappings", None)
         self.normalization_config = configValues.get("normalization_config", 1)
+        self.model_capabilities = _resolve_model_capabilities(configValues, self.model_type)
+        self.supported_target_scopes = _resolve_supported_target_scopes(configValues)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for models of type model")
         if self.model_category is not None and len(self.model_category) > 1:
@@ -61,12 +71,18 @@ class AIModel(Model):
 
     async def worker_function(self, data):
         try:
-            first_image_shape = data[0].item_future[data[0].input_names[0]].shape
-            # Create an empty tensor with the same shape as the input images
-            images = torch.empty((len(data), *first_image_shape), device=self.localdevice)
-            for i, item in enumerate(data):
+            if self.model is None:
+                await self.load()
+            if self.model is None:
+                raise RuntimeError(f"Failed to initialize model runner for {self.model_file_name}")
+
+            resized_images = []
+            for item in data:
                 itemFuture = item.item_future
-                images[i] = itemFuture[item.input_names[0]]
+                image_tensor = _get_model_input_tensor(itemFuture, item.input_names[0], self.model_image_size)
+                resized_images.append(image_tensor)
+
+            images = torch.stack(resized_images, dim=0).to(self.localdevice)
 
             curr = time.time()
             results = self.model.process_images(images)
@@ -122,6 +138,110 @@ class AIModel(Model):
                 self.category_mappings = {i: 0 for i, _ in  enumerate(self.tags)}
         else:
             self.model.load_model()
+
+
+def _resize_tensor_to_model_size(image_tensor: torch.Tensor, model_image_size) -> torch.Tensor:
+    if not isinstance(image_tensor, torch.Tensor):
+        return image_tensor
+
+    if model_image_size is None:
+        return image_tensor
+
+    target_size = int(model_image_size)
+    if target_size <= 0:
+        return image_tensor
+
+    if image_tensor.dim() != 3:
+        return image_tensor
+
+    current_h = int(image_tensor.shape[-2])
+    current_w = int(image_tensor.shape[-1])
+    if current_h == target_size and current_w == target_size:
+        return image_tensor
+
+    resized = F.interpolate(
+        image_tensor.unsqueeze(0),
+        size=(target_size, target_size),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+    return resized.to(dtype=image_tensor.dtype)
+
+
+def _get_model_input_tensor(item_future, input_name: str, model_image_size):
+    image_tensor = item_future[input_name]
+    if not isinstance(image_tensor, torch.Tensor):
+        return image_tensor
+
+    target_size = _normalize_target_size(model_image_size)
+    if target_size is None or image_tensor.dim() != 3:
+        return image_tensor
+
+    current_h = int(image_tensor.shape[-2])
+    current_w = int(image_tensor.shape[-1])
+    if current_h == target_size and current_w == target_size:
+        return image_tensor
+
+    cache = item_future.data.setdefault("_resized_tensor_cache", {})
+    cache_key = (input_name, target_size, current_h, current_w, str(image_tensor.dtype))
+    cached_tensor = cache.get(cache_key, None)
+    if isinstance(cached_tensor, torch.Tensor):
+        return cached_tensor
+
+    resized_tensor = _resize_tensor_to_model_size(image_tensor, target_size)
+    cache[cache_key] = resized_tensor
+    return resized_tensor
+
+
+def _normalize_target_size(model_image_size):
+    if model_image_size is None:
+        return None
+    target_size = int(model_image_size)
+    if target_size <= 0:
+        return None
+    return target_size
+
+def _normalize_string_list(raw_value) -> List[str] | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        return [raw_value]
+    if isinstance(raw_value, Iterable):
+        normalized = []
+        for item in raw_value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized or None
+    return [str(raw_value)]
+
+
+def _resolve_model_capabilities(config_values, model_type: str) -> List[str]:
+    configured = config_values.get("model_capabilities", config_values.get("capabilities", None))
+    normalized = _normalize_string_list(configured)
+    if normalized:
+        valid = [capability for capability in normalized if capability in VALID_MODEL_CAPABILITIES]
+        if valid:
+            return valid
+
+    model_type_normalized = (model_type or "").lower()
+    if "embed" in model_type_normalized:
+        return ["embedding"]
+    if "detect" in model_type_normalized:
+        return ["detection"]
+    return [DEFAULT_MODEL_CAPABILITY]
+
+
+def _resolve_supported_target_scopes(config_values) -> List[str]:
+    configured = config_values.get("supported_target_scopes", config_values.get("target_scopes", None))
+    normalized = _normalize_string_list(configured)
+    if normalized:
+        valid = [scope for scope in normalized if scope in VALID_TARGET_SCOPES]
+        if valid:
+            return valid
+    return DEFAULT_SUPPORTED_TARGET_SCOPES.copy()
 
 def get_index_to_tag_mapping(path):
     """

@@ -39,12 +39,15 @@ class Pipeline:
             if not model["name"]:
                 raise ValueError("Error: Model name must be a non-empty string!")
             modelName = model["name"]
-            if modelName == "dynamic_video_ai":
-                dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"])
-                self.models.extend(dynamic_models)
-                continue
-            elif modelName == "dynamic_image_ai":
-                dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"])
+            if modelName in ["dynamic_video_ai", "dynamic_image_ai", "dynamic_region_ai", "dynamic_ai"]:
+                if modelName == "dynamic_video_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"])
+                elif modelName == "dynamic_image_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"])
+                elif modelName == "dynamic_region_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_region_ai_models(model["inputs"], model["outputs"])
+                else:
+                    dynamic_models = dynamic_ai_manager.get_dynamic_models_from_config(model)
                 self.models.extend(dynamic_models)
                 continue
             returned_model = model_manager.get_or_create_model(modelName)
@@ -87,7 +90,17 @@ class Pipeline:
         ai_models_info = []
         for model in self.models:
             if isinstance(model.model.model, AIModel):
-                ai_models_info.append(AIModelInfo(name=model.model.model.model_file_name, identifier=model.model.model.model_identifier, version=model.model.model.model_version, categories=model.model.model.model_category, type=model.model.model.model_type))
+                ai_models_info.append(
+                    AIModelInfo(
+                        name=model.model.model.model_file_name,
+                        identifier=model.model.model.model_identifier,
+                        version=model.model.model.model_version,
+                        categories=model.model.model.model_category,
+                        type=model.model.model.model_type,
+                        capabilities=model.model.model.model_capabilities,
+                        supported_scopes=model.model.model.supported_target_scopes,
+                    )
+                )
         return ai_models_info
 
 def validate_string_list(input_list):

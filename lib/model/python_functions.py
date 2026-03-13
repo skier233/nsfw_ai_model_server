@@ -2,13 +2,17 @@
 import asyncio
 import logging
 import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import torch
+from lib.async_lib.async_processing import ItemFuture
 from lib.model.preprocessing_python.image_preprocessing import get_video_duration_deffcode
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult, AIVideoResultV3
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
 from lib.model.skip_input import Skip
 from lib.model.postprocessing.post_processing_settings import get_or_default, post_processing_config
+from lib.pipeline.target_primitives import build_region_target, targets_to_dicts
 
 logger = logging.getLogger("logger")
 
@@ -16,10 +20,45 @@ async def result_coalescer(data):
     for item in data:
         itemFuture = item.item_future
         result = {}
+        structured_outputs = []
+        structured_errors = []
         for input_name in item.input_names:
             ai_result = itemFuture[input_name]
-            if not isinstance(ai_result, Skip):
-                result[input_name] = itemFuture[input_name]
+            if isinstance(ai_result, Skip):
+                structured_outputs.append(
+                    {
+                        "model_step": input_name,
+                        "status": "skipped",
+                        "payload": None,
+                    }
+                )
+                continue
+
+            if isinstance(ai_result, Exception):
+                error_text = str(ai_result)
+                structured_outputs.append(
+                    {
+                        "model_step": input_name,
+                        "status": "error",
+                        "payload": None,
+                        "error": error_text,
+                    }
+                )
+                structured_errors.append({"model_step": input_name, "error": error_text})
+                continue
+
+            result[input_name] = ai_result
+            structured_outputs.append(
+                {
+                    "model_step": input_name,
+                    "status": "ok",
+                    "payload": ai_result,
+                }
+            )
+
+        result["_outputs"] = structured_outputs
+        if structured_errors:
+            result["_errors"] = structured_errors
         await itemFuture.set_data(item.output_names[0], result)
         
 async def result_finisher(data):
@@ -33,7 +72,13 @@ async def batch_awaiter(data):
         itemFuture = item.item_future
         futures = itemFuture[item.input_names[0]]
         results = await asyncio.gather(*futures, return_exceptions=True)
-        await itemFuture.set_data(item.output_names[0], results)
+        normalized_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                normalized_results.append({"_error": str(result), "_status": "error"})
+            else:
+                normalized_results.append(result)
+        await itemFuture.set_data(item.output_names[0], normalized_results)
 
 async def video_result_postprocessor(data):
     for item in data:
@@ -59,8 +104,11 @@ async def video_result_postprocessor_v3(data):
         pipeline = itemFuture['pipeline']
         currently_active_models = pipeline.get_ai_models_info()
 
+        raw_frames = itemFuture[item.input_names[0]]
+        clean_frames, frame_structured_outputs, frame_errors = _extract_structured_frames(raw_frames)
+
         result = {
-            "frames": itemFuture[item.input_names[0]],
+            "frames": clean_frames,
             "video_duration": duration,
             "frame_interval": float(itemFuture[item.input_names[2]]),
             "threshold": float(itemFuture[item.input_names[3]]),
@@ -97,7 +145,18 @@ async def video_result_postprocessor_v3(data):
         total_runtime = metrics.get("preprocess_seconds", 0.0) + metrics.get("ai_inference_seconds", 0.0)
         metrics["total_runtime_seconds"] = total_runtime
 
-        payload = {"result": videoResult, "metrics": metrics}
+        results_v2 = {
+            "assets": [
+                {
+                    "asset_id": str(itemFuture[item.input_names[1]]),
+                    "frames": frame_structured_outputs,
+                    "errors": frame_errors,
+                }
+            ],
+            "errors": frame_errors,
+        }
+
+        payload = {"result": videoResult, "results_v2": results_v2, "metrics": metrics}
 
         await itemFuture.set_data(item.output_names[0], payload)
 
@@ -137,6 +196,16 @@ async def image_result_postprocessor_v3(data):
         itemFuture = item.item_future
         pipeline = itemFuture['pipeline']
         result = itemFuture[item.input_names[0]]
+        coalesced_outputs = []
+        coalesced_errors = []
+        if isinstance(result, dict):
+            coalesced_outputs = list(result.get("_outputs") or [])
+            coalesced_errors = list(result.get("_errors") or [])
+            result = {
+                key: value
+                for key, value in result.items()
+                if not str(key).startswith("_")
+            }
         # v3 API: do not rely on category_config for filtering/renaming.
         # Preserve the model output shape (category -> list of tags/tuples) as-is.
         toReturn = {}
@@ -164,9 +233,258 @@ async def image_result_postprocessor_v3(data):
         total_runtime = metrics.get("preprocess_seconds", 0.0) + metrics.get("ai_inference_seconds", 0.0)
         metrics["total_runtime_seconds"] = total_runtime
 
+        source_asset_id = itemFuture["image_path"]
+        target = {
+            "target_id": "asset:0",
+            "scope": "asset",
+            "source_asset_id": str(source_asset_id) if source_asset_id is not None else "unknown",
+        }
+        results_v2 = {
+            "assets": [
+                {
+                    "asset_id": target["source_asset_id"],
+                    "targets": [target],
+                    "outputs": coalesced_outputs,
+                    "errors": coalesced_errors,
+                }
+            ],
+            "errors": coalesced_errors,
+        }
+
         if "pipeline" in itemFuture.data:
             del itemFuture.data["pipeline"]
 
-        payload = {"result": toReturn, "metrics": metrics}
+        payload = {"result": toReturn, "results_v2": results_v2, "metrics": metrics}
 
         await itemFuture.set_data(item.output_names[0], payload)
+
+
+async def detector_result_to_region_targets(data):
+    for item in data:
+        itemFuture = item.item_future
+        detections = itemFuture[item.input_names[0]]
+        source_asset_id = itemFuture[item.input_names[1]]
+
+        frame_index = None
+        source_tensor = None
+        parent_target_id = None
+
+        if len(item.input_names) > 2:
+            third_input = itemFuture[item.input_names[2]]
+            if isinstance(third_input, torch.Tensor):
+                source_tensor = third_input
+            else:
+                frame_index = third_input
+
+        if len(item.input_names) > 3:
+            fourth_input = itemFuture[item.input_names[3]]
+            if source_tensor is None and isinstance(fourth_input, torch.Tensor):
+                source_tensor = fourth_input
+            elif frame_index is None:
+                frame_index = fourth_input
+            else:
+                parent_target_id = fourth_input
+
+        if len(item.input_names) > 4:
+            parent_target_id = itemFuture[item.input_names[4]]
+
+        source_height, source_width = _extract_tensor_hw(source_tensor)
+        candidate_detections = _extract_detection_items(detections)
+
+        region_targets = []
+        region_errors = []
+        for detection_index, detection in enumerate(candidate_detections):
+            bbox = _extract_detection_bbox(detection)
+            if bbox is None:
+                region_errors.append(
+                    {
+                        "index": detection_index,
+                        "error": "missing_bbox",
+                        "raw_detection": detection,
+                    }
+                )
+                continue
+
+            try:
+                target = build_region_target(
+                    source_asset_id=str(source_asset_id),
+                    bbox=bbox,
+                    frame_index=frame_index,
+                    parent_target_id=parent_target_id,
+                    source_width=source_width,
+                    source_height=source_height,
+                    metadata={
+                        "detection_index": detection_index,
+                        "detector_payload": detection,
+                    },
+                )
+                region_targets.append(target)
+            except Exception as exc:
+                region_errors.append(
+                    {
+                        "index": detection_index,
+                        "error": str(exc),
+                        "raw_detection": detection,
+                    }
+                )
+
+        await itemFuture.set_data(item.output_names[0], targets_to_dicts(region_targets))
+        if len(item.output_names) > 1:
+            await itemFuture.set_data(item.output_names[1], region_errors)
+
+
+async def region_children_builder(data):
+    for item in data:
+        itemFuture = item.item_future
+        source_tensor = itemFuture[item.input_names[0]]
+        region_targets = itemFuture[item.input_names[1]] or []
+        threshold = itemFuture[item.input_names[2]] if len(item.input_names) > 2 else None
+        return_confidence = itemFuture[item.input_names[3]] if len(item.input_names) > 3 else None
+        skipped_categories = itemFuture[item.input_names[4]] if len(item.input_names) > 4 else None
+
+        children = []
+        if not isinstance(source_tensor, torch.Tensor):
+            raise ValueError("region_children_builder requires source_tensor input as a torch.Tensor")
+
+        source_height, source_width = _extract_tensor_hw(source_tensor)
+        if source_height is None or source_width is None:
+            raise ValueError("region_children_builder could not determine source tensor dimensions")
+
+        for region_target in region_targets:
+            bbox = region_target.get("bbox") if isinstance(region_target, dict) else None
+            if bbox is None:
+                continue
+
+            crop_tensor = _crop_and_resize_region(source_tensor, bbox)
+            payload = {
+                item.output_names[1]: crop_tensor,
+                item.output_names[2]: region_target,
+                item.output_names[3]: threshold,
+                item.output_names[4]: return_confidence,
+                item.output_names[5]: skipped_categories,
+            }
+            child_future = await ItemFuture.create(item, payload, item.item_future.handler)
+            children.append(child_future)
+
+        await itemFuture.set_data(item.output_names[0], children)
+
+
+def _extract_tensor_hw(source_tensor):
+    if isinstance(source_tensor, torch.Tensor):
+        if source_tensor.dim() == 3:
+            return int(source_tensor.shape[-2]), int(source_tensor.shape[-1])
+        if source_tensor.dim() == 4:
+            return int(source_tensor.shape[-2]), int(source_tensor.shape[-1])
+    return None, None
+
+
+def _extract_detection_items(detections):
+    if detections is None:
+        return []
+    if isinstance(detections, dict):
+        if "detections" in detections and isinstance(detections["detections"], list):
+            return detections["detections"]
+        if "face_detections" in detections and isinstance(detections["face_detections"], list):
+            return detections["face_detections"]
+        for value in detections.values():
+            if isinstance(value, list) and value:
+                first = value[0]
+                if isinstance(first, dict) and ("bbox" in first or "box" in first):
+                    return value
+        return [detections]
+    if isinstance(detections, list):
+        return detections
+    return []
+
+
+def _extract_detection_bbox(detection):
+    if detection is None:
+        return None
+    if isinstance(detection, dict):
+        bbox = detection.get("bbox", None)
+        if bbox is not None:
+            return bbox
+        alt = detection.get("box", None)
+        if alt is not None:
+            return alt
+    if isinstance(detection, (list, tuple)) and len(detection) == 4:
+        return detection
+    return None
+
+
+def _crop_and_resize_region(source_tensor: torch.Tensor, bbox: Sequence[float]) -> torch.Tensor:
+    x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+
+    tensor = source_tensor
+    squeeze = False
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)
+        squeeze = True
+
+    source_h = int(tensor.shape[-2])
+    source_w = int(tensor.shape[-1])
+
+    x1 = min(max(x1, 0), source_w)
+    x2 = min(max(x2, 0), source_w)
+    y1 = min(max(y1, 0), source_h)
+    y2 = min(max(y2, 0), source_h)
+
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid bbox after clamping; zero-area crop")
+
+    cropped = tensor[..., y1:y2, x1:x2]
+    if squeeze:
+        cropped = cropped.squeeze(0)
+    return cropped
+
+
+def _round_up_multiple(value: int, multiple: int) -> int:
+    if multiple <= 1:
+        return value
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def _extract_structured_frames(raw_frames):
+    clean_frames = []
+    frame_structured_outputs = []
+    frame_errors = []
+
+    if raw_frames is None:
+        return clean_frames, frame_structured_outputs, frame_errors
+
+    for frame_index, frame in enumerate(raw_frames):
+        if isinstance(frame, Exception):
+            frame_errors.append(
+                {
+                    "frame": frame_index,
+                    "error": str(frame),
+                    "status": "error",
+                }
+            )
+            continue
+
+        if not isinstance(frame, dict):
+            frame_errors.append(
+                {
+                    "frame": frame_index,
+                    "error": f"Unexpected frame payload type: {type(frame).__name__}",
+                    "status": "error",
+                }
+            )
+            continue
+
+        frame_outputs = frame.get("_outputs") or []
+        for output in frame_outputs:
+            output_copy = dict(output)
+            output_copy["frame"] = frame.get("frame_index", frame_index)
+            frame_structured_outputs.append(output_copy)
+
+        for error in frame.get("_errors") or []:
+            error_copy = dict(error)
+            error_copy["frame"] = frame.get("frame_index", frame_index)
+            frame_errors.append(error_copy)
+
+        clean_frame = {key: value for key, value in frame.items() if not str(key).startswith("_")}
+        clean_frames.append(clean_frame)
+
+    return clean_frames, frame_structured_outputs, frame_errors

@@ -3,6 +3,7 @@ import logging
 from lib.async_lib.async_processing import ModelProcessor
 from lib.config.config_utils import load_config
 from lib.model.ai_model import AIModel
+from lib.model.face_torch_export_model import FaceTorchExportModel
 from lib.model.python_model import PythonModel
 from lib.model.video_preprocessor import VideoPreprocessorModel
 from lib.model.image_preprocessor import ImagePreprocessorModel
@@ -57,6 +58,8 @@ class ModelManager:
 
 
                 return model_processor
+            case "face_torch_export":
+                return ModelProcessor(FaceTorchExportModel(model_config))
             case "python":
                 return ModelProcessor(PythonModel(model_config))
             case _:
