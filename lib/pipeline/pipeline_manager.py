@@ -15,6 +15,7 @@ class PipelineManager:
         self.dynamic_ai_manager = DynamicAIManager(self.model_manager)
     
     async def load_pipelines(self, pipeline_strings):
+        self.dynamic_ai_manager.set_known_pipelines(pipeline_strings)
         for pipeline in pipeline_strings:
             self.logger.info(f"Loading pipeline: {pipeline}")
             if not isinstance(pipeline, str):
@@ -22,14 +23,14 @@ class PipelineManager:
             pipeline_config_path = f"./config/pipelines/{pipeline}.yaml"
             try:
                 loaded_config = load_config(pipeline_config_path)
-                newpipeline = Pipeline(loaded_config, self.model_manager, self.dynamic_ai_manager)
+                newpipeline = Pipeline(loaded_config, self.model_manager, self.dynamic_ai_manager, pipeline_name=pipeline)
                 self.pipelines[pipeline] = newpipeline
                 await newpipeline.start_model_processing()
                 self.logger.info(f"Pipeline {pipeline} V{newpipeline.version} loaded successfully!")
             except NoActiveModelsException as e:
                 raise e
             except Exception as e:
-                del self.pipelines[pipeline]
+                self.pipelines.pop(pipeline, None)
                 self.logger.error(f"Error loading pipeline {pipeline}: {e}")
                 self.logger.debug("Exception details:", exc_info=True)
             

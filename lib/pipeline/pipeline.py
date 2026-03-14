@@ -14,7 +14,7 @@ class ModelWrapper:
         self.outputs = outputs
 
 class Pipeline:
-    def __init__(self, configValues, model_manager, dynamic_ai_manager):
+    def __init__(self, configValues, model_manager, dynamic_ai_manager, pipeline_name=None):
         if not validate_string_list(configValues["inputs"]):
             raise ValueError("Error: Pipeline inputs must be a non-empty list of strings!")
         if not configValues["output"]:
@@ -41,13 +41,13 @@ class Pipeline:
             modelName = model["name"]
             if modelName in ["dynamic_video_ai", "dynamic_image_ai", "dynamic_region_ai", "dynamic_ai"]:
                 if modelName == "dynamic_video_ai":
-                    dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"])
+                    dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
                 elif modelName == "dynamic_image_ai":
-                    dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"])
+                    dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
                 elif modelName == "dynamic_region_ai":
-                    dynamic_models = dynamic_ai_manager.get_dynamic_region_ai_models(model["inputs"], model["outputs"])
+                    dynamic_models = dynamic_ai_manager.get_dynamic_region_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
                 else:
-                    dynamic_models = dynamic_ai_manager.get_dynamic_models_from_config(model)
+                    dynamic_models = dynamic_ai_manager.get_dynamic_models_from_config(model, pipeline_name=pipeline_name)
                 self.models.extend(dynamic_models)
                 continue
             returned_model = model_manager.get_or_create_model(modelName)
@@ -58,7 +58,9 @@ class Pipeline:
             if isinstance(model.model.model, AIModel):
                 for category in model.model.model.model_category:
                     if category in categories_set:
-                        raise ValueError("Error: AI models must not have overlapping categories!")
+                        logger.warning(
+                            f"Duplicate AI model category '{category}' detected in pipeline '{self.short_name}'. Allowing overlap for multi-stage flows."
+                        )
                     categories_set.add(category)
     
     async def event_handler(self, itemFuture, key):
