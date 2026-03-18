@@ -19,8 +19,15 @@ class ImagePreprocessorModel(Model):
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
                 norm_config = self.normalization_config or 1
+                dual_output = len(item.output_names) > 1
                 start_time = time.perf_counter()
-                preprocessed_frame = preprocess_image(input_data, self.image_size, self.use_half_precision, self.device, norm_config=norm_config)
+                if dual_output:
+                    preprocessed_frame, raw_frame = preprocess_image(
+                        input_data, self.image_size, self.use_half_precision,
+                        self.device, norm_config=norm_config, include_raw=True,
+                    )
+                else:
+                    preprocessed_frame = preprocess_image(input_data, self.image_size, self.use_half_precision, self.device, norm_config=norm_config)
                 elapsed = time.perf_counter() - start_time
                 root_future = getattr(itemFuture, "root_future", itemFuture)
                 metrics = getattr(root_future, "_pipeline_metrics", None)
@@ -30,6 +37,11 @@ class ImagePreprocessorModel(Model):
                 metrics["preprocess_seconds"] = metrics.get("preprocess_seconds", 0.0) + elapsed
                 metrics["images_preprocessed"] = metrics.get("images_preprocessed", 0) + 1
                 metrics["preprocess_backend"] = "image_preprocessor"
+                # Set the raw output first so the longer detector → region
+                # chain can start while the classification model runs in
+                # parallel on the processed tensor.
+                if dual_output:
+                    await itemFuture.set_data(item.output_names[1], raw_frame)
                 await itemFuture.set_data(item.output_names[0], preprocessed_frame)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error} for file: {input_data}")

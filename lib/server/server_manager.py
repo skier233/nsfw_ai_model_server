@@ -31,7 +31,7 @@ class ServerManager:
         if os.path.exists(config_path):
             config = load_config(config_path, default_config={})
         else:
-            ServerStopException(f"Main config file does not exist: {config_path}")
+            raise ServerStopException(f"Main config file does not exist: {config_path}")
         loglevel = config.get("loglevel", "INFO")
         setup_logger("logger", loglevel)
         self.logger = logging.getLogger("logger")

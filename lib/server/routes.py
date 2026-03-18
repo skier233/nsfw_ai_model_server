@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from fastapi import HTTPException
 from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
@@ -10,6 +11,20 @@ from lib.server.server_manager import server_manager, app, outstanding_requests_
 import torch
 import time
 from lib.model.postprocessing.category_settings import category_config
+
+def _get_request_timeout() -> float:
+    """Return the per-request timeout in seconds (0 = no timeout)."""
+    raw = os.environ.get("REQUEST_TIMEOUT_SECONDS", "0")
+    try:
+        return max(float(raw), 0.0)
+    except (ValueError, TypeError):
+        return 0.0
+
+async def _await_with_timeout(future, timeout: float):
+    """Await a future with an optional timeout. timeout <= 0 means no limit."""
+    if timeout <= 0:
+        return await future
+    return await asyncio.wait_for(future, timeout=timeout)
 
 logger = logging.getLogger("logger")
 
@@ -63,8 +78,11 @@ async def process_video(request: VideoPathList):
                 data = [request.path, request.returnTimestamps, request.frame_interval, request.threshold, request.return_confidence, request.vr_video, video_result, skipped_categories]
 
         try:
+            timeout = _get_request_timeout()
             future = await server_manager.get_request_future(data, pipeline_name)
-            result = await future
+            result = await _await_with_timeout(future, timeout)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Video processing timed out")
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         
@@ -87,9 +105,12 @@ async def process_video_v3(request: VideoRequestV3):
 
         result = None
         try:
+            timeout = _get_request_timeout()
             future = await server_manager.get_request_future(data, pipeline_name)
-            result = await future
+            result = await _await_with_timeout(future, timeout)
             logger.debug(f"Video v3 processing result: {result}")
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Video processing timed out")
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         return result
@@ -106,8 +127,12 @@ async def process_images_v3(request: ImageRequestV3):
         logger.info(f"Processing {len(image_paths)} images")
         pipeline_name = "image_pipeline_dynamic_v3"
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
+        timeout = _get_request_timeout()
         futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
-        results = await asyncio.gather(*futures, return_exceptions=True)
+        if timeout > 0:
+            results = await asyncio.gather(*[_await_with_timeout(f, timeout) for f in futures], return_exceptions=True)
+        else:
+            results = await asyncio.gather(*futures, return_exceptions=True)
 
         aggregate_metrics = {
             "preprocess_seconds": 0.0,

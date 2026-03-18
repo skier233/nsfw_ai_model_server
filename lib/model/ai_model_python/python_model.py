@@ -3,15 +3,17 @@ import gc
 import torch
 
 class PythonModel:
-    def __init__(self, path, batch_size, device, fill_batch_size):
+    def __init__(self, path, batch_size, device, fill_batch_size, keep_on_device=False):
         self.model_path = path
         self.max_batch_size = batch_size
         self.fill_batch_size = fill_batch_size
+        self.keep_on_device = keep_on_device
         if device:
             self.device = torch.device(device)
         else:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
         self._model_loaded = False
+        self._is_exported = self.model_path.endswith('.pt2')
         self.load_model()
 
         self.model_loaded = True
@@ -34,7 +36,30 @@ class PythonModel:
     
         # Remove the outputs corresponding to the padding images
         output = output[:original_batch_size]
+        if self.keep_on_device:
+            return output
         return output.cpu()
+
+    def run_raw(self, input_tensor):
+        """Run model without sigmoid, respecting keep_on_device setting."""
+        return self.run_model(input_tensor, False)
+
+    def run_raw_multi_output(self, input_tensor):
+        """Run model returning all output heads as a list of numpy arrays.
+        For multi-output models (e.g. face detection).
+        """
+        import numpy as np
+        input_tensor = input_tensor.to(self.device)
+        if input_tensor.dtype != torch.float16:
+            input_tensor = input_tensor.half()
+        with torch.no_grad():
+            with torch.autocast(self.device.type, enabled=True):
+                outputs = self.model(input_tensor)
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+        elif not isinstance(outputs, (tuple, list)):
+            outputs = tuple(outputs)
+        return [o.detach().cpu().numpy() for o in outputs]
 
     def process_images(self, preprocessed_images, applySigmoid = True):
         if preprocessed_images.size(0) <= self.max_batch_size:
@@ -50,7 +75,11 @@ class PythonModel:
     def load_model(self):
         if self.model_loaded:
             return
-        self.model = torch.jit.load(self.model_path, map_location=self.device).to(self.device)
+        if self._is_exported:
+            from torch.export import load as export_load
+            self.model = export_load(self.model_path).module().to(self.device)
+        else:
+            self.model = torch.jit.load(self.model_path, map_location=self.device).to(self.device)
         self.model_loaded = True
 
     def unload_model(self):

@@ -221,6 +221,8 @@ def _finalize_decoded_tensor(tensor: torch.Tensor, image_path: str) -> torch.Ten
     return _ensure_rgb_channels(tensor, image_path)
 
 def get_normalization_config(index, device):
+    if index == -1:
+        return None, None
     normalization_configs = [
         (torch.tensor([0.485, 0.456, 0.406], device=device), torch.tensor([0.229, 0.224, 0.225], device=device)),
         (torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device), torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device)),
@@ -311,10 +313,11 @@ def get_frame_transforms(
     vr_video: bool = False,
     img_size: int = 512,
     apply_resize: bool = True,
+    scale_values: bool = True,
 ):
     dtype = torch.float16 if use_half_precision else torch.float32
     transforms_list = [
-        transforms.ToDtype(dtype, scale=True),
+        transforms.ToDtype(dtype, scale=scale_values),
     ]
     if apply_resize:
         transforms_list.insert(0, transforms.Resize((img_size, img_size), interpolation=InterpolationMode.BICUBIC))
@@ -346,7 +349,14 @@ class DimensionError(Exception):
     def __repr__(self):
         return f"DimensionError({super().__str__()})"
 
-def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None, norm_config=1):
+def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None, norm_config=1, include_raw=False):
+    """Preprocess a single image from *image_path*.
+
+    When *include_raw* is ``True`` the function returns a
+    ``(processed_tensor, raw_tensor)`` tuple where *raw_tensor* is the
+    original-resolution ``float32`` CHW tensor with values in ``[0, 255]``.
+    Both tensors are produced from a **single** disk read.
+    """
     # Resolve device
     if device:
         device = torch.device(device)
@@ -355,41 +365,71 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     mean, std = get_normalization_config(norm_config, device)
+    raw_mode = (norm_config == -1)
 
-    # Build the canonical transforms (resize -> dtype -> normalize)
+    # Build canonical transforms.
+    # If img_size <= 0, keep original spatial resolution and skip resize.
+    apply_resize = False
+    resolved_img_size = img_size
+    try:
+        resolved_img_size = int(img_size)
+        apply_resize = resolved_img_size > 0
+    except Exception:
+        resolved_img_size = 512
+        apply_resize = True
+
+    # Build the canonical transforms (optional resize -> dtype -> normalize)
     frame_transforms = get_frame_transforms(
         use_half_precision,
         mean,
         std,
         vr_video=False,
-        img_size=img_size,
-        apply_resize=True,
+        img_size=resolved_img_size,
+        apply_resize=apply_resize,
+        scale_values=(not raw_mode),
     )
 
     # Read image via torchvision unless running on ROCm, where Pillow is needed for JPEGs.
     img = _load_image_tensor(image_path)
     # Move to target device and run transforms
     img = img.to(device)
+
+    # Capture the raw original-resolution tensor *before* transforms touch it.
+    # torchvision v2 transforms return new tensors, so ``img`` stays intact
+    # after ``frame_transforms(img)`` — but we convert to float32 [0-255]
+    # eagerly so downstream consumers see a consistent dtype.
+    raw = img.float() if include_raw else None
+
     out = frame_transforms(img)
 
-    # Validate final tensor shape: (3, img_size, img_size)
     if out.ndim != 3 or out.shape[0] != 3:
+        if apply_resize:
+            raise DimensionError(
+                f"Invalid Image: Image has invalid shape {tuple(out.shape)} for '{image_path}'; "
+                f"expected (3, {resolved_img_size}, {resolved_img_size})."
+            )
         raise DimensionError(
             f"Invalid Image: Image has invalid shape {tuple(out.shape)} for '{image_path}'; "
-            f"expected (3, {img_size}, {img_size})."
+            "expected a 3-channel CHW tensor when no-resize preprocessing is enabled."
         )
 
+    if include_raw:
+        return out, raw
     return out
     
 
-def _prepare_frame(frame, device, vr_video, frame_transforms):
+def _prepare_frame(frame, device, vr_video, frame_transforms, include_raw=False):
     tensor = _ensure_torch_tensor(frame, device, pin_memory=True, non_blocking=True)
     
     if vr_video:
         tensor = vr_permute(tensor)
     
     tensor = tensor.permute(2, 0, 1)
-    return frame_transforms(tensor) 
+    if include_raw:
+        # Capture raw CHW [0-255] float32 *before* normalisation/resize
+        raw = tensor.float()
+        return frame_transforms(tensor), raw
+    return frame_transforms(tensor)
 
 
 #TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
@@ -402,6 +442,7 @@ def preprocess_video(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    include_raw=False,
 ):
     """
     Preprocess video using decord (CPU-based).
@@ -419,6 +460,7 @@ def preprocess_video(
             use_timestamps=use_timestamps,
             vr_video=vr_video,
             norm_config=norm_config,
+            include_raw=include_raw,
         )
         return
 
@@ -449,7 +491,7 @@ def preprocess_video(
 
     processed = 0
     for i in range(0, len(vr), frame_step):
-        frame_tensor = _prepare_frame(vr[i], device, vr_video, frame_transforms)
+        result = _prepare_frame(vr[i], device, vr_video, frame_transforms, include_raw=include_raw)
         if use_timestamps:
             if frame_interval and frame_interval > 0:
                 frame_index = processed * frame_interval
@@ -457,7 +499,10 @@ def preprocess_video(
                 frame_index = i / fps if fps else float(processed)
         else:
             frame_index = i
-        yield (frame_index, frame_tensor)
+        if include_raw:
+            yield (frame_index, result[0], result[1])
+        else:
+            yield (frame_index, result)
         processed += 1
     del vr
 
@@ -549,6 +594,7 @@ def preprocess_video_deffcode_auto(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    include_raw=False,
 ):
     """
     Automatically select GPU or CPU preprocessing based on video resolution and GPU availability.
@@ -620,6 +666,7 @@ def preprocess_video_deffcode_auto(
                 use_timestamps=use_timestamps,
                 vr_video=vr_video,
                 norm_config=norm_config,
+                include_raw=include_raw,
             ):
                 yielded_any = True
                 yield item
@@ -647,6 +694,7 @@ def preprocess_video_deffcode_auto(
         use_timestamps=use_timestamps,
         vr_video=vr_video,
         norm_config=norm_config,
+        include_raw=include_raw,
     )
 
 def preprocess_video_deffcode(
@@ -658,6 +706,7 @@ def preprocess_video_deffcode(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    include_raw=False,
 ):
     """
     Preprocess video using CPU-based DeFFcode with FFmpeg filtering.
@@ -734,7 +783,7 @@ def preprocess_video_deffcode(
             if frame is None:
                 continue
 
-            tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
+            result = _prepare_frame(frame, device, vr_video, frame_transforms, include_raw=include_raw)
 
             if use_timestamps:
                 if frame_interval and frame_interval > 0:
@@ -744,7 +793,10 @@ def preprocess_video_deffcode(
             else:
                 output_index = processed  # Use processed count as index
 
-            yield (output_index, tensor)
+            if include_raw:
+                yield (output_index, result[0], result[1])
+            else:
+                yield (output_index, result)
             processed += 1
     finally:
         terminate = getattr(decoder, "terminate", None)
@@ -761,6 +813,7 @@ def preprocess_video_deffcode_gpu(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    include_raw=False,
 ):
     """
     Preprocess video using NVDEC hardware acceleration via DeFFcode.
@@ -887,7 +940,7 @@ def preprocess_video_deffcode_gpu(
             if frame is None:
                 continue
 
-            tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
+            result = _prepare_frame(frame, device, vr_video, frame_transforms, include_raw=include_raw)
 
             if use_timestamps:
                 if frame_interval and frame_interval > 0:
@@ -900,7 +953,10 @@ def preprocess_video_deffcode_gpu(
                 else:
                     output_index = index
 
-            yield (output_index, tensor)
+            if include_raw:
+                yield (output_index, result[0], result[1])
+            else:
+                yield (output_index, result)
             processed += 1
     finally:
         terminate = getattr(decoder, "terminate", None)

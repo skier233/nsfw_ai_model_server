@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -68,17 +69,68 @@ async def result_finisher(data):
         itemFuture.close_future(future_results)
 
 async def batch_awaiter(data):
+    """
+    Non-blocking child-future joiner.
+
+    Instead of blocking the worker while waiting for children to complete,
+    this spawns a lightweight async task per item and returns immediately.
+    The worker is freed to process other queued items. When all children
+    finish, the task writes the aggregated result back via set_data,
+    which re-enters the pipeline event handler normally.
+
+    This means batch_awaiter can safely be nested (e.g. video frame children
+    that themselves have region children) without deadlocking, because no
+    worker is held while waiting.
+    """
     for item in data:
         itemFuture = item.item_future
-        futures = itemFuture[item.input_names[0]]
-        results = await asyncio.gather(*futures, return_exceptions=True)
+        child_futures = itemFuture[item.input_names[0]]
+        if child_futures is None:
+            child_futures = []
+        if not isinstance(child_futures, list):
+            child_futures = [child_futures]
+
+        # Fire-and-forget: spawn a task that monitors children and writes
+        # the result back to the parent future when they all complete.
+        # The worker returns immediately after this loop.
+        asyncio.create_task(
+            _join_child_futures(itemFuture, child_futures, item.output_names[0])
+        )
+
+
+async def _join_child_futures(parent_future, child_futures, output_name):
+    """Await all child futures and write aggregated results to the parent."""
+    try:
+        # Collect the underlying asyncio.Future from each ItemFuture
+        raw_futures = []
+        for child in child_futures:
+            if hasattr(child, "future") and child.future is not None:
+                raw_futures.append(child.future)
+            elif isinstance(child, asyncio.Future):
+                raw_futures.append(child)
+            else:
+                raw_futures.append(asyncio.ensure_future(child))
+
+        if not raw_futures:
+            await parent_future.set_data(output_name, [])
+            return
+
+        results = await asyncio.gather(*raw_futures, return_exceptions=True)
+
         normalized_results = []
         for result in results:
             if isinstance(result, Exception):
                 normalized_results.append({"_error": str(result), "_status": "error"})
             else:
                 normalized_results.append(result)
-        await itemFuture.set_data(item.output_names[0], normalized_results)
+
+        await parent_future.set_data(output_name, normalized_results)
+    except Exception as e:
+        logger.error(f"_join_child_futures failed: {e}", exc_info=True)
+        try:
+            parent_future.set_exception(e)
+        except Exception:
+            pass
 
 async def video_result_postprocessor(data):
     for item in data:
@@ -106,9 +158,10 @@ async def video_result_postprocessor_v3(data):
 
         raw_frames = itemFuture[item.input_names[0]]
         clean_frames, frame_structured_outputs, frame_errors = _extract_structured_frames(raw_frames)
+        timespan_frames = _filter_timespan_compatible_frames(clean_frames)
 
         result = {
-            "frames": clean_frames,
+            "frames": timespan_frames,
             "video_duration": duration,
             "frame_interval": float(itemFuture[item.input_names[2]]),
             "threshold": float(itemFuture[item.input_names[3]]),
@@ -260,6 +313,12 @@ async def image_result_postprocessor_v3(data):
 
 
 async def detector_result_to_region_targets(data):
+    max_targets_raw = os.environ.get("MAX_REGION_TARGETS_PER_ITEM", "64")
+    try:
+        max_targets_per_item = int(max_targets_raw)
+    except Exception:
+        max_targets_per_item = 64
+
     for item in data:
         itemFuture = item.item_future
         detections = itemFuture[item.input_names[0]]
@@ -290,6 +349,22 @@ async def detector_result_to_region_targets(data):
 
         source_height, source_width = _extract_tensor_hw(source_tensor)
         candidate_detections = _extract_detection_items(detections)
+
+        if max_targets_per_item > 0 and len(candidate_detections) > max_targets_per_item:
+            sortable = []
+            unsorted = []
+            for det in candidate_detections:
+                if isinstance(det, dict) and isinstance(det.get("score", None), (int, float)):
+                    sortable.append(det)
+                else:
+                    unsorted.append(det)
+            sortable.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+            candidate_detections = (sortable + unsorted)[:max_targets_per_item]
+            logger.warning(
+                "Capped region targets to %s for source '%s'",
+                max_targets_per_item,
+                source_asset_id,
+            )
 
         region_targets = []
         region_errors = []
@@ -363,6 +438,8 @@ async def region_children_builder(data):
                 item.output_names[4]: return_confidence,
                 item.output_names[5]: skipped_categories,
             }
+            if len(item.output_names) > 6:
+                payload[item.output_names[6]] = source_tensor
             child_future = await ItemFuture.create(item, payload, item.item_future.handler)
             children.append(child_future)
 
@@ -485,6 +562,38 @@ def _extract_structured_frames(raw_frames):
             frame_errors.append(error_copy)
 
         clean_frame = {key: value for key, value in frame.items() if not str(key).startswith("_")}
+        if "frame_index" not in clean_frame:
+            clean_frame["frame_index"] = frame_index
         clean_frames.append(clean_frame)
 
     return clean_frames, frame_structured_outputs, frame_errors
+
+
+def _filter_timespan_compatible_frames(frames):
+    filtered_frames = []
+    for frame_index, frame in enumerate(frames or []):
+        if not isinstance(frame, dict):
+            continue
+
+        filtered = {"frame_index": frame.get("frame_index", frame_index)}
+        for key, value in frame.items():
+            if key == "frame_index":
+                continue
+            if not isinstance(value, list):
+                continue
+
+            normalized_items = []
+            for item in value:
+                if isinstance(item, str):
+                    normalized_items.append(item)
+                    continue
+                if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+                    normalized_items.append(item)
+                    continue
+
+            if normalized_items:
+                filtered[key] = normalized_items
+
+        filtered_frames.append(filtered)
+
+    return filtered_frames

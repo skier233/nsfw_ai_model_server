@@ -80,7 +80,14 @@ class DynamicAIManager:
 
         normalized_mode = (mode or "").lower()
         if normalized_mode == "video":
-            return self._create_dynamic_video_wrappers(inputs, outputs, selected_models)
+            should_expand_region_branch = not bool(_normalize_string_list(required_capabilities)) and required_scope is None
+            return self._create_dynamic_video_wrappers(
+                inputs,
+                outputs,
+                selected_models,
+                pipeline_name=pipeline_name,
+                enable_region_branch=should_expand_region_branch,
+            )
         if normalized_mode == "image":
             should_expand_region_branch = not bool(_normalize_string_list(required_capabilities)) and required_scope is None
             return self._create_dynamic_image_wrappers(
@@ -123,49 +130,50 @@ class DynamicAIManager:
             pipeline_name=pipeline_name,
         )
 
-    def _create_dynamic_video_wrappers(self, inputs, outputs, models):
+    def _create_dynamic_video_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
         model_wrappers = []
         video_preprocessor = self.model_manager.get_or_create_model("video_preprocessor_dynamic")
         image_size, norm_config = self._resolve_preprocess_settings(models)
         video_preprocessor.model.image_size = image_size
         video_preprocessor.model.normalization_config = norm_config
 
-        # add a preprocessor
-        model_wrappers.append(ModelWrapper(video_preprocessor, inputs, ["dynamic_children", "dynamic_frame", "frame_index", "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"]))
+        # Pre-scan detectors: if any detector has region branches, add a
+        # single extra output for the original-resolution raw frame.  Both
+        # detectors (which handle their own internal 640-resize with correct
+        # aspect ratio) and region builders (which crop/align subimages at
+        # full resolution) share this tensor.
+        _region_frame_key = None   # set once when first detector is found
+        _extra_frame_specs = []
+        preproc_outputs = [
+            "dynamic_children", "dynamic_frame", "frame_index",
+            "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories",
+        ]
+
+        if pipeline_name and enable_region_branch:
+            _prescan_detector_names = self.model_capabilities.resolve_model_names_for_stage(
+                pipeline_name=pipeline_name,
+                stage="detector",
+                available_models=self.models,
+            )
+            if _prescan_detector_names:
+                # One original-resolution raw frame output shared by all
+                # detectors and region branches.
+                _region_frame_key = "dynamic_frame__region_source"
+                out_idx = len(preproc_outputs)
+                preproc_outputs.append(_region_frame_key)
+                _extra_frame_specs.append({
+                    "output_index": out_idx,
+                    "image_size": 0,     # no resize — keep original frame resolution
+                    "norm_config": -1,   # raw [0-255] pixels
+                    "use_half": False,
+                })
+
+        video_preprocessor.model.extra_frame_specs = _extra_frame_specs
+        model_wrappers.append(ModelWrapper(video_preprocessor, inputs, preproc_outputs))
 
         # add the ai models
         for model in models:
             model_wrappers.append(ModelWrapper(model, ["dynamic_frame", "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"], model.model.model_category))
-
-        # coalesce all the ai results
-        coalesce_inputs = self._build_coalesce_inputs(models)
-        coalesce_inputs.insert(0, "frame_index")
-        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_coalescer"), coalesce_inputs, ["dynamic_result"]))
-
-        # finish results
-        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_finisher"), ["dynamic_result"], []))
-
-        # await children
-        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("batch_awaiter"), ["dynamic_children"], outputs))
-        self.logger.debug("Finished creating dynamic Video AI models")
-        return model_wrappers
-    
-    def get_dynamic_image_ai_models(self, inputs, outputs, pipeline_name=None):
-        return self.get_dynamic_models(mode="image", inputs=inputs, outputs=outputs, pipeline_name=pipeline_name)
-
-    def _create_dynamic_image_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
-        model_wrappers = []
-        image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
-        image_size, norm_config = self._resolve_preprocess_settings(models)
-        image_preprocessor.model.image_size = image_size
-        image_preprocessor.model.normalization_config = norm_config
-
-        # add a preprocessor
-        model_wrappers.append(ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image"]))
-
-        # add the ai models
-        for model in models:
-            model_wrappers.append(ModelWrapper(model, ["dynamic_image", inputs[1], inputs[2], inputs[3]], model.model.model_category))
 
         additional_coalesce_inputs = []
         if pipeline_name and enable_region_branch:
@@ -186,10 +194,18 @@ class DynamicAIManager:
                 for detector_name, detector_model in zip(detector_names, detector_models):
                     detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
                     additional_coalesce_inputs.extend(detector_outputs)
+
+                    # All detectors receive the original-resolution raw frame.
+                    # run_detection() inside each model handles its own resize
+                    # to the model’s det_size (e.g. 640×640) with correct
+                    # aspect-ratio preservation and produces bboxes/kps in
+                    # original-frame coordinates.
+                    detector_frame_key = _region_frame_key or "dynamic_frame"
+
                     model_wrappers.append(
                         ModelWrapper(
                             detector_model,
-                            ["dynamic_image", inputs[1], inputs[2], inputs[3]],
+                            [detector_frame_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
                             detector_outputs,
                         )
                     )
@@ -236,20 +252,21 @@ class DynamicAIManager:
                     return_confidence_key = f"dynamic_return_confidence__{alias}"
                     skipped_categories_key = f"dynamic_skipped_categories__{alias}"
                     region_result_key = f"dynamic_region_result__{alias}"
-                    region_results_key = f"face_region_results__{alias}"
+                    region_results_key = f"dynamic_region_results__{alias}"
 
                     model_wrappers.append(
                         ModelWrapper(
                             self.model_manager.get_or_create_model("detector_result_to_region_targets"),
-                            [detector_output_key, inputs[0], "dynamic_image"],
+                            [detector_output_key, "frame_index", detector_frame_key, "frame_index"],
                             [region_targets_key, region_errors_key],
                         )
                     )
 
+                    # Region source is the original-resolution raw frame.
                     model_wrappers.append(
                         ModelWrapper(
                             self.model_manager.get_or_create_model("region_children_builder"),
-                            ["dynamic_image", region_targets_key, inputs[1], inputs[2], inputs[3]],
+                            [detector_frame_key, region_targets_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
                             [
                                 children_key,
                                 region_image_key,
@@ -257,6 +274,7 @@ class DynamicAIManager:
                                 threshold_key,
                                 return_confidence_key,
                                 skipped_categories_key,
+                                f"dynamic_region_source__{alias}",
                             ],
                         )
                     )
@@ -304,6 +322,199 @@ class DynamicAIManager:
         coalesce_inputs = self._build_coalesce_inputs(models)
         coalesce_inputs.extend(additional_coalesce_inputs)
         coalesce_inputs = _dedupe_strings(coalesce_inputs)
+        coalesce_inputs.insert(0, "frame_index")
+        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_coalescer"), coalesce_inputs, ["dynamic_result"]))
+
+        # finish results
+        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_finisher"), ["dynamic_result"], []))
+
+        # await children
+        model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("batch_awaiter"), ["dynamic_children"], outputs))
+        self.logger.debug("Finished creating dynamic Video AI models")
+        return model_wrappers
+    
+    def get_dynamic_image_ai_models(self, inputs, outputs, pipeline_name=None):
+        return self.get_dynamic_models(mode="image", inputs=inputs, outputs=outputs, pipeline_name=pipeline_name)
+
+    def _create_dynamic_image_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
+        model_wrappers = []
+        image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
+        image_size, norm_config = self._resolve_preprocess_settings(models)
+        image_preprocessor.model.image_size = image_size
+        image_preprocessor.model.normalization_config = norm_config
+
+        # ── Peek ahead: do we need a region-source (raw) tensor? ──
+        # If detectors + region models are configured we produce the raw
+        # original-resolution [0-255] tensor from the SAME preprocessor
+        # that builds the classification tensor – one disk read instead of
+        # two.  The preprocessor's dual-output mode emits the raw tensor
+        # as its second output_name.
+        _region_source_key = None
+        _needs_region_source = False
+        if pipeline_name and enable_region_branch:
+            _det_names = self.model_capabilities.resolve_model_names_for_stage(
+                pipeline_name=pipeline_name,
+                stage="detector",
+                available_models=self.models,
+            )
+            _region_rules = self.model_capabilities.get_region_model_rules(pipeline_name)
+            _needs_region_source = bool(_det_names) and bool(_region_rules)
+
+        if _needs_region_source:
+            _region_source_key = "dynamic_image__region_source"
+            model_wrappers.append(
+                ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image", _region_source_key])
+            )
+        else:
+            model_wrappers.append(ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image"]))
+
+        # add the ai models
+        for model in models:
+            model_wrappers.append(ModelWrapper(model, ["dynamic_image", inputs[1], inputs[2], inputs[3]], model.model.model_category))
+
+        additional_coalesce_inputs = []
+        if _needs_region_source:
+            detector_names = _det_names
+            region_model_rules = _region_rules
+            detector_models = self._select_models_by_name(detector_names)
+            region_rules_by_detector = {
+                str(rule.get("key", "")).strip(): rule
+                for rule in region_model_rules
+            }
+
+            for detector_name, detector_model in zip(detector_names, detector_models):
+                detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
+                additional_coalesce_inputs.extend(detector_outputs)
+
+                # Every detector receives the original-resolution raw
+                # image.  run_detection() inside each model handles its
+                # own resize to the model's det_size (e.g. 640×640) with
+                # correct aspect-ratio preservation and produces bboxes/
+                # kps in original-image coordinates.
+                model_wrappers.append(
+                    ModelWrapper(
+                        detector_model,
+                        [_region_source_key, inputs[1], inputs[2], inputs[3]],
+                        detector_outputs,
+                    )
+                )
+
+                detector_rule = region_rules_by_detector.get(detector_name, None)
+                if detector_rule is None:
+                    continue
+
+                region_model_names = list(detector_rule.get("models", []) or [])
+                if not region_model_names:
+                    label_model_map = detector_rule.get("label_models", {}) or {}
+                    for label_models in label_model_map.values():
+                        region_model_names.extend(_normalize_string_list(label_models) or [])
+                    region_model_names = _dedupe_strings(region_model_names)
+                    if region_model_names:
+                        self.logger.warning(
+                            f"Pipeline '{pipeline_name}' defines label-specific region_models for detector '{detector_name}', "
+                            f"but label-specific routing is not available yet. Running union of all configured label model lists."
+                        )
+
+                if not region_model_names:
+                    continue
+
+                if len(detector_outputs) == 0:
+                    self.logger.warning(
+                        f"Skipping region branch for detector '{detector_name}' in pipeline '{pipeline_name}' because it emits no output categories"
+                    )
+                    continue
+
+                detector_output_key = detector_outputs[0]
+                if len(detector_outputs) > 1:
+                    self.logger.warning(
+                        f"Detector '{detector_name}' in pipeline '{pipeline_name}' emits multiple output keys {detector_outputs}. "
+                        f"Using '{detector_output_key}' for region target extraction."
+                    )
+
+                alias = _sanitize_key(detector_name)
+                region_targets_key = f"region_targets__{alias}"
+                region_errors_key = f"region_errors__{alias}"
+                children_key = f"dynamic_region_children__{alias}"
+                region_image_key = f"dynamic_region_image__{alias}"
+                region_target_key = f"dynamic_region_target__{alias}"
+                threshold_key = f"dynamic_threshold__{alias}"
+                return_confidence_key = f"dynamic_return_confidence__{alias}"
+                skipped_categories_key = f"dynamic_skipped_categories__{alias}"
+                region_result_key = f"dynamic_region_result__{alias}"
+                region_results_key = f"face_region_results__{alias}"
+
+                # Region source is the original-resolution image.
+                # Detection coords (bboxes, kps) are already in original
+                # space (run_detection scales them back), so cropping and
+                # ArcFace alignment operate at full resolution.
+
+                model_wrappers.append(
+                    ModelWrapper(
+                        self.model_manager.get_or_create_model("detector_result_to_region_targets"),
+                        [detector_output_key, inputs[0], _region_source_key],
+                        [region_targets_key, region_errors_key],
+                    )
+                )
+
+                model_wrappers.append(
+                    ModelWrapper(
+                        self.model_manager.get_or_create_model("region_children_builder"),
+                        [_region_source_key, region_targets_key, inputs[1], inputs[2], inputs[3]],
+                        [
+                            children_key,
+                            region_image_key,
+                            region_target_key,
+                            threshold_key,
+                            return_confidence_key,
+                            skipped_categories_key,
+                            f"dynamic_region_source__{alias}",
+                        ],
+                    )
+                )
+
+                region_models = self._select_models_by_name(region_model_names)
+                region_branch_outputs = []
+                for region_model in region_models:
+                    branch_outputs = _normalize_string_list(region_model.model.model_category) or []
+                    region_branch_outputs.extend(branch_outputs)
+                    model_wrappers.append(
+                        ModelWrapper(
+                            region_model,
+                            [region_image_key, threshold_key, return_confidence_key, skipped_categories_key],
+                            branch_outputs,
+                        )
+                    )
+
+                model_wrappers.append(
+                    ModelWrapper(
+                        self.model_manager.get_or_create_model("result_coalescer"),
+                        [region_target_key] + region_branch_outputs,
+                        [region_result_key],
+                    )
+                )
+
+                model_wrappers.append(
+                    ModelWrapper(
+                        self.model_manager.get_or_create_model("result_finisher"),
+                        [region_result_key],
+                        [],
+                    )
+                )
+
+                model_wrappers.append(
+                    ModelWrapper(
+                        self.model_manager.get_or_create_model("batch_awaiter"),
+                        [children_key],
+                        [region_results_key],
+                    )
+                )
+
+                additional_coalesce_inputs.extend([region_targets_key, region_errors_key, region_results_key])
+
+        # coalesce all the ai results
+        coalesce_inputs = self._build_coalesce_inputs(models)
+        coalesce_inputs.extend(additional_coalesce_inputs)
+        coalesce_inputs = _dedupe_strings(coalesce_inputs)
         model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_coalescer"), coalesce_inputs, outputs=outputs))
 
         self.logger.debug("Finished creating dynamic Image AI models")
@@ -325,6 +536,7 @@ class DynamicAIManager:
                     "dynamic_threshold",
                     "dynamic_return_confidence",
                     "dynamic_skipped_categories",
+                    "dynamic_region_source",
                 ],
             )
         )
@@ -534,7 +746,8 @@ class DynamicAIManager:
 
             model_name = file_name[:-5]
             model_config = load_config(os.path.join(models_directory, file_name), default_config={}) or {}
-            if model_config.get("type") != "model":
+            model_type = model_config.get("type", "")
+            if model_type not in ("model", "face_torch_export"):
                 continue
 
             capabilities = self._infer_model_capabilities(model_config)
@@ -594,5 +807,27 @@ def _sanitize_key(value: str) -> str:
         return "unknown"
     return re.sub(r"[^0-9a-zA-Z_]+", "_", text)
 
-        
+
+def _get_detector_preprocess_spec(detector_model):
+    """Return the ``(image_size, normalization_config, use_half_precision)``
+    that *detector_model* requires, or ``None`` when it is happy with the
+    default pipeline preprocessor output.
+
+    The tuple is used to configure a dedicated preprocessor so the detector
+    receives a tensor at exactly its declared resolution and pixel format
+    without storing a full-resolution copy.
+    """
+    inner = getattr(detector_model, "model", None)
+    if inner is None:
+        return None
+    face_role = getattr(inner, "face_model_role", None)
+    model_type = str(getattr(inner, "model_type", "") or "").lower().replace("_", "").replace(" ", "")
+    if face_role is not None or "facetorchexport" in model_type:
+        return (
+            getattr(inner, "model_image_size", 640) or 640,
+            -1,     # raw [0-255] pixels, no normalization
+            False,  # float32 — face models need full precision
+        )
+    return None
+
 

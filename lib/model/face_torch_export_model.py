@@ -1,4 +1,13 @@
+"""
+DEPRECATED: This module has been replaced by:
+  - lib.model.ai_face_detection_model.AIFaceDetectionModel
+  - lib.model.ai_face_embedding_model.AIFaceEmbeddingModel
+
+Kept for reference only. No longer imported by model_manager.
+"""
+
 import logging
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -8,6 +17,19 @@ import torch.nn.functional as F
 from torchvision.io import read_image
 
 from lib.model.ai_model import AIModel
+from lib.utils.torch_device_selector import get_device_string
+
+
+ARCFACE_DST = np.array(
+    [
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ],
+    dtype=np.float32,
+)
 
 
 class FaceTorchExportModel(AIModel):
@@ -47,11 +69,14 @@ class FaceTorchExportModel(AIModel):
         self.face_model_role = str(configValues.get("face_model_role", "detection")).lower()
         self.det_size = tuple(configValues.get("det_size", [640, 640]))
         self.det_nms_thresh = float(configValues.get("det_nms_thresh", 0.4))
-        self.device = configValues.get("device", "cpu")
+        self.device = configValues.get("device", None)
+        if self.device is None:
+            self.device = get_device_string()
 
         self.model = None
 
     async def worker_function(self, data):
+        batch_started_at = time.time()
         for item in data:
             item_future = item.item_future
             try:
@@ -67,6 +92,9 @@ class FaceTorchExportModel(AIModel):
                 self.logger.error(f"Error in FaceTorchExportModel ({self.face_model_role}): {e}")
                 self.logger.debug("Stack trace:", exc_info=True)
                 item_future.set_exception(e)
+        self.logger.debug(
+            f"Processed {len(data)} images in {time.time() - batch_started_at} in {self.model_file_name} ({self.model_category})"
+        )
 
     async def load(self):
         if self.model is not None:
@@ -76,7 +104,9 @@ class FaceTorchExportModel(AIModel):
             raise FileNotFoundError(f"Face torch.export model not found: {model_path}")
         exported_program = torch.export.load(str(model_path))
         self.model = exported_program.module().to(self.device)
-        self.logger.info(f"Loaded face torch.export model: {model_path}")
+        self.logger.info(
+            f"Loaded face torch.export model: {model_path} (role={self.face_model_role}, device={self.device})"
+        )
 
     def _run_detection_item(self, item):
         item_future = item.item_future
@@ -110,7 +140,12 @@ class FaceTorchExportModel(AIModel):
         if not isinstance(tensor, torch.Tensor):
             raise ValueError("Embedding face model expects tensor input")
 
-        image = tensor_to_model_rgb(tensor)
+        aligned_image = self._try_aligned_face_image(item_future)
+        if aligned_image is not None:
+            image = aligned_image
+        else:
+            image = _ensure_model_rgb_gpu(tensor)
+
         image = image.unsqueeze(0)
         image = F.interpolate(image, size=(112, 112), mode="bilinear", align_corners=False)
         input_tensor = (image - 127.5) / 127.5
@@ -124,6 +159,24 @@ class FaceTorchExportModel(AIModel):
         norm = float(np.linalg.norm(feat_np))
         return [{"vector": feat_np.tolist(), "norm": norm, "embedder": self.model_file_name}]
 
+    def _try_aligned_face_image(self, item_future):
+        try:
+            region_target = _resolve_future_key(item_future, "dynamic_region_target")
+            source_tensor = _resolve_future_key(item_future, "dynamic_region_source")
+            if not isinstance(region_target, dict) or not isinstance(source_tensor, torch.Tensor):
+                return None
+
+            metadata = region_target.get("metadata") or {}
+            detector_payload = metadata.get("detector_payload") or {}
+            kps = detector_payload.get("kps")
+            kps = _normalize_kps(kps)
+            if kps is None:
+                return None
+
+            return _norm_crop_gpu(source_tensor, kps, image_size=112)
+        except Exception:
+            return None
+
     def _resolve_image_for_detection(self, item):
         item_future = item.item_future
         source = item_future[item.input_names[0]]
@@ -135,6 +188,29 @@ class FaceTorchExportModel(AIModel):
             image = read_image(str(image_path))
             return image
         raise ValueError("Detection model could not resolve source image")
+
+
+def _ensure_model_rgb_gpu(tensor: torch.Tensor) -> torch.Tensor:
+    """Ensure tensor is [0, 255] float RGB CHW, staying on the same device."""
+    t = tensor.detach()
+    if t.dim() == 4:
+        t = t[0]
+    if t.dim() != 3:
+        raise ValueError("Expected CHW tensor")
+    t = t.float()
+    tmin = float(t.min())
+    tmax = float(t.max())
+    if tmin >= 0.0 and tmax > 1.1:
+        return t.clamp(0.0, 255.0)
+    if tmin >= -1.1 and tmax <= 1.1:
+        return ((t + 1.0) * 127.5).clamp(0.0, 255.0)
+    if tmin >= -5.0 and tmax <= 5.0:
+        mean = torch.tensor([0.485, 0.456, 0.406], device=t.device, dtype=torch.float32).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=t.device, dtype=torch.float32).view(3, 1, 1)
+        return ((t * std + mean) * 255.0).clamp(0.0, 255.0)
+    if tmin >= 0.0 and tmax <= 1.1:
+        return (t * 255.0).clamp(0.0, 255.0)
+    return t.clamp(0.0, 255.0)
 
 
 def tensor_to_model_rgb(tensor: torch.Tensor):
@@ -160,6 +236,122 @@ def tensor_to_model_rgb(tensor: torch.Tensor):
 
     arr = np.clip(arr, 0.0, 255.0)
     return torch.from_numpy(np.transpose(arr, (2, 0, 1))).float()
+
+
+def _resolve_future_key(item_future, prefix):
+    """Look up *prefix* in an ``ItemFuture``, falling back to any key that
+    starts with *prefix* (e.g. ``dynamic_region_target__<alias>`` when the
+    exact key ``dynamic_region_target`` is absent).  This lets models work
+    with both aliased (v3 dynamic pipelines) and un-aliased (standalone
+    region pipelines) key names."""
+    value = item_future[prefix]
+    if value is not None:
+        return value
+    data = getattr(item_future, "data", None)
+    if data is None:
+        return None
+    for key in data:
+        if key.startswith(prefix):
+            return data[key]
+    return None
+
+
+def _normalize_kps(kps):
+    if kps is None:
+        return None
+    arr = np.asarray(kps, dtype=np.float32)
+    if arr.shape != (5, 2):
+        return None
+    return arr
+
+
+def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
+    if landmark.shape != (5, 2):
+        raise ValueError("Expected landmark shape (5, 2)")
+
+    if image_size % 112 == 0:
+        ratio = float(image_size) / 112.0
+        diff_x = 0.0
+    else:
+        ratio = float(image_size) / 128.0
+        diff_x = 8.0 * ratio
+
+    dst = ARCFACE_DST.copy() * ratio
+    dst[:, 0] += diff_x
+
+    src = landmark.astype(np.float32)
+    dst = dst.astype(np.float32)
+
+    a_rows = []
+    b_vals = []
+    for (x, y), (u, v) in zip(src, dst):
+        a_rows.append([x, y, 1.0, 0.0, 0.0, 0.0])
+        a_rows.append([0.0, 0.0, 0.0, x, y, 1.0])
+        b_vals.append(u)
+        b_vals.append(v)
+
+    A = np.asarray(a_rows, dtype=np.float32)
+    b = np.asarray(b_vals, dtype=np.float32)
+    params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    M = np.asarray(
+        [
+            [params[0], params[1], params[2]],
+            [params[3], params[4], params[5]],
+        ],
+        dtype=np.float32,
+    )
+    return M
+
+
+def _norm_crop_gpu(source_tensor: torch.Tensor, landmark: np.ndarray, image_size: int = 112):
+    """GPU-based ArcFace alignment using grid_sample (no CPU roundtrip)."""
+    M = _estimate_arcface_affine(landmark, image_size=image_size)
+
+    t = source_tensor.detach()
+    if t.dim() == 4:
+        t = t[0]
+    t = t.float()
+    _, iH, iW = t.shape
+
+    # Invert affine: maps output pixel coords → input pixel coords
+    M3 = np.vstack([M, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
+    M_inv = np.linalg.inv(M3)[:2].astype(np.float64)
+
+    # Convert pixel-coord affine to normalised [-1, 1] coords for grid_sample
+    oW = oH = float(image_size)
+    theta = np.zeros((2, 3), dtype=np.float64)
+    theta[0, 0] = M_inv[0, 0] * (oW - 1) / (iW - 1)
+    theta[0, 1] = M_inv[0, 1] * (oH - 1) / (iW - 1)
+    theta[0, 2] = (M_inv[0, 0] * (oW - 1) + M_inv[0, 1] * (oH - 1) + 2 * M_inv[0, 2]) / (iW - 1) - 1
+    theta[1, 0] = M_inv[1, 0] * (oW - 1) / (iH - 1)
+    theta[1, 1] = M_inv[1, 1] * (oH - 1) / (iH - 1)
+    theta[1, 2] = (M_inv[1, 0] * (oW - 1) + M_inv[1, 1] * (oH - 1) + 2 * M_inv[1, 2]) / (iH - 1) - 1
+
+    theta_t = torch.tensor(theta, dtype=torch.float32, device=t.device).unsqueeze(0)
+    grid = F.affine_grid(theta_t, [1, 3, image_size, image_size], align_corners=True)
+    aligned = F.grid_sample(t.unsqueeze(0), grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+    return aligned.squeeze(0)
+
+
+def _norm_crop_tensor(source_tensor: torch.Tensor, landmark: np.ndarray, image_size: int = 112):
+    """Legacy CPU-based alignment (kept for fallback compatibility)."""
+    from PIL import Image
+
+    M = _estimate_arcface_affine(landmark, image_size=image_size)
+    M3 = np.vstack([M, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
+    inv = np.linalg.inv(M3)
+    coeffs = inv[:2, :].reshape(-1).tolist()
+
+    rgb = tensor_to_model_rgb(source_tensor)
+    chw = rgb.detach().cpu().numpy().astype(np.float32)
+    hwc = np.transpose(chw, (1, 2, 0))
+    hwc_u8 = np.clip(hwc, 0.0, 255.0).astype(np.uint8)
+
+    pil = Image.fromarray(hwc_u8, mode="RGB")
+    aligned = pil.transform((image_size, image_size), Image.AFFINE, data=coeffs, resample=Image.BILINEAR)
+    aligned_arr = np.asarray(aligned, dtype=np.float32)
+    aligned_chw = np.transpose(aligned_arr, (2, 0, 1))
+    return torch.from_numpy(aligned_chw)
 
 
 def _scrfd_meta(outputs_len):
@@ -226,7 +418,23 @@ def nms(dets, thresh):
 
 
 def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thresh=0.4, device="cpu"):
-    rgb_tensor = tensor_to_model_rgb(img)
+    # Detect whether input is already in raw [0-255] RGB range (GPU-resident).
+    # If so, skip the expensive CPU-based tensor_to_model_rgb conversion.
+    img_t = img.detach() if isinstance(img, torch.Tensor) else img
+    if isinstance(img_t, torch.Tensor) and img_t.dim() >= 3:
+        tmin = float(img_t.min())
+        tmax = float(img_t.max())
+        is_raw = tmin >= 0.0 and tmax > 1.1 and tmax <= 256.0
+    else:
+        is_raw = False
+
+    if is_raw:
+        rgb_tensor = img_t.float()
+        if rgb_tensor.dim() == 4:
+            rgb_tensor = rgb_tensor[0]
+    else:
+        rgb_tensor = tensor_to_model_rgb(img)
+
     im_ratio = float(rgb_tensor.shape[1]) / rgb_tensor.shape[2]
     model_ratio = float(det_size[1]) / det_size[0]
     if im_ratio > model_ratio:
@@ -244,7 +452,7 @@ def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thres
         align_corners=False,
     ).squeeze(0)
 
-    canvas = torch.zeros((3, det_size[1], det_size[0]), dtype=torch.float32)
+    canvas = torch.zeros((3, det_size[1], det_size[0]), dtype=torch.float32, device=rgb_tensor.device)
     canvas[:, :new_height, :new_width] = resized
     input_tensor = ((canvas - 127.5) / 128.0).unsqueeze(0).to(device)
     outputs = _run_module(det_model, input_tensor)

@@ -87,6 +87,7 @@ class ModelProcessor():
         self.max_batch_waits = self.model.max_batch_waits
         self.workers_started = False
         self.failed_loading = False
+        self._loading_event = None
         self.is_ai_model = isinstance(self.model, AIModel)
         self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)
 
@@ -160,16 +161,21 @@ class ModelProcessor():
         if self.workers_started:
             if self.failed_loading:
                 raise Exception("Error: Model failed to load!")
+            if self._loading_event is not None:
+                await self._loading_event.wait()
             return
         else:
             try:
+                self._loading_event = asyncio.Event()
                 self.workers_started = True
                 await self.model.load()
                 for _ in range(self.instance_count):
                     asyncio.create_task(self.worker_process())
-                    self.workers_started = True
+                self._loading_event.set()
             except Exception as e:
                 self.failed_loading = True
+                if self._loading_event is not None:
+                    self._loading_event.set()
                 raise e
 
     def _record_ai_runtime(self, batch_data, elapsed):

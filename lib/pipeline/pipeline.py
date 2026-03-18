@@ -33,6 +33,7 @@ class Pipeline:
 
 
         self.models = []
+        self._input_to_models = {}  # key -> list[ModelWrapper] index for O(1) event_handler lookup
         for model in configValues["models"]:
             if not validate_string_list(model["inputs"]):
                 raise ValueError("Error: Model inputs must be a non-empty list of strings!")
@@ -53,6 +54,8 @@ class Pipeline:
             returned_model = model_manager.get_or_create_model(modelName)
             self.models.append(ModelWrapper(returned_model, model["inputs"], model["outputs"]))
 
+        self._rebuild_input_index()
+
         categories_set = set()
         for model in self.models:
             if isinstance(model.model.model, AIModel):
@@ -63,14 +66,25 @@ class Pipeline:
                         )
                     categories_set.add(category)
     
+    def _rebuild_input_index(self):
+        """Build a dict mapping each input key to the ModelWrappers that need it."""
+        self._input_to_models = {}
+        for model in self.models:
+            for input_name in model.inputs:
+                if input_name not in self._input_to_models:
+                    self._input_to_models[input_name] = []
+                self._input_to_models[input_name].append(model)
+
     async def event_handler(self, itemFuture, key):
         if key == self.output:
             itemFuture.close_future(itemFuture[key])
-        for model in self.models:
-            if key in model.inputs:
-                allOtherInputsPresent = all(inputName in itemFuture.data for inputName in model.inputs if inputName != key)
-                if allOtherInputsPresent:
-                    await model.model.add_to_queue(QueueItem(itemFuture, model.inputs, model.outputs))
+        matching_models = self._input_to_models.get(key)
+        if matching_models is None:
+            return
+        for model in matching_models:
+            allOtherInputsPresent = all(inputName in itemFuture.data for inputName in model.inputs if inputName != key)
+            if allOtherInputsPresent:
+                await model.model.add_to_queue(QueueItem(itemFuture, model.inputs, model.outputs))
 
     async def start_model_processing(self):
         for model in self.models:

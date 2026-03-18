@@ -8,7 +8,9 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video,
     preprocess_video_deffcode,
     preprocess_video_deffcode_gpu,
-    preprocess_video_deffcode_auto
+    preprocess_video_deffcode_auto,
+    get_normalization_config,
+    get_frame_transforms,
 )
 
 class VideoPreprocessorModel(Model):
@@ -20,6 +22,14 @@ class VideoPreprocessorModel(Model):
         self.device = configValues.get("device", None)
         self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
+
+        # Extra per-model frame specs set by the dynamic AI manager.
+        # Each entry: {"output_index": int, "image_size": int,
+        #              "norm_config": int, "use_half": bool}
+        # When present the preprocessor captures the base CHW tensor from
+        # each decoded frame and applies each spec's transforms to produce
+        # additional model-resolution-matched outputs.
+        self.extra_frame_specs = []
 
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
@@ -69,6 +79,31 @@ class VideoPreprocessorModel(Model):
                 preprocess_callable = self._preprocess_callable
                 backend_used = self._preprocess_backend
 
+                # When extra specs are configured, request the base CHW
+                # tensor from the preprocess function so we can apply
+                # model-resolution-matched transforms per spec.
+                _extra_specs = self.extra_frame_specs or []
+                include_base = bool(_extra_specs)
+
+                # Pre-build extra transform pipelines (cheap — runs once)
+                _extra_transforms = []
+                if include_base:
+                    _resolve_device = torch.device(self.device) if self.device else torch.device(
+                        'cuda' if torch.cuda.is_available() else 'cpu'
+                    )
+                    for spec in _extra_specs:
+                        s_mean, s_std = get_normalization_config(spec["norm_config"], _resolve_device)
+                        s_raw = (spec["norm_config"] == -1)
+                        s_xform = get_frame_transforms(
+                            spec["use_half"],
+                            s_mean,
+                            s_std,
+                            img_size=spec["image_size"],
+                            apply_resize=(spec["image_size"] > 0),
+                            scale_values=(not s_raw),
+                        )
+                        _extra_transforms.append((spec["output_index"], s_xform))
+
                 try:
                     frame_source = preprocess_callable(
                         input_data,
@@ -79,6 +114,7 @@ class VideoPreprocessorModel(Model):
                         use_timestamps,
                         vr_video=vr_video,
                         norm_config=norm_config,
+                        include_raw=include_base,
                     )
                 except Exception as exc:
                     if preprocess_callable is preprocess_video_deffcode_gpu:
@@ -98,6 +134,7 @@ class VideoPreprocessorModel(Model):
                             use_timestamps,
                             vr_video=vr_video,
                             norm_config=norm_config,
+                            include_raw=include_base,
                         )
                     elif preprocess_callable is preprocess_video_deffcode:
                         self.logger.warning(
@@ -116,6 +153,7 @@ class VideoPreprocessorModel(Model):
                             use_timestamps,
                             vr_video=vr_video,
                             norm_config=norm_config,
+                            include_raw=include_base,
                         )
                     else:
                         raise
@@ -125,11 +163,15 @@ class VideoPreprocessorModel(Model):
                     while True:
                         chunk_start = time.perf_counter()
                         try:
-                            frame_index, frame = next(frame_iterator)
+                            frame_data = next(frame_iterator)
                         except StopIteration:
                             break
                         preprocess_time += time.perf_counter() - chunk_start
                         frame_count += 1
+
+                        frame_index = frame_data[0]
+                        frame = frame_data[1]
+
                         payload = {
                             item.output_names[1]: frame,
                             item.output_names[2]: frame_index,
@@ -137,6 +179,12 @@ class VideoPreprocessorModel(Model):
                             item.output_names[4]: itemFuture[item.input_names[4]],
                             item.output_names[5]: itemFuture[item.input_names[6]],
                         }
+                        # Apply model-resolution-matched transforms for each
+                        # extra spec (e.g. face detector @ 640×640 [0-255]).
+                        if include_base and len(frame_data) > 2:
+                            base_tensor = frame_data[2]
+                            for out_idx, xform in _extra_transforms:
+                                payload[item.output_names[out_idx]] = xform(base_tensor.clone())
                         result = await ItemFuture.create(item, payload, item.item_future.handler)
                         children.append(result)
                 finally:

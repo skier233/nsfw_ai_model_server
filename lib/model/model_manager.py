@@ -3,7 +3,9 @@ import logging
 from lib.async_lib.async_processing import ModelProcessor
 from lib.config.config_utils import load_config
 from lib.model.ai_model import AIModel
-from lib.model.face_torch_export_model import FaceTorchExportModel
+from lib.model.ai_tagging_model import AITaggingModel
+from lib.model.ai_face_detection_model import AIFaceDetectionModel
+from lib.model.ai_face_embedding_model import AIFaceEmbeddingModel
 from lib.model.python_model import PythonModel
 from lib.model.video_preprocessor import VideoPreprocessorModel
 from lib.model.image_preprocessor import ImagePreprocessorModel
@@ -47,7 +49,7 @@ class ModelManager:
             case "image_preprocessor":
                 return ModelProcessor(ImagePreprocessorModel(model_config))
             case "model":
-                model_processor = ModelProcessor(AIModel(model_config))
+                model_processor = ModelProcessor(AITaggingModel(model_config))
                 self.ai_models.append(model_processor)
                 model_count = len(self.ai_models)
                 if model_count > 1:
@@ -59,7 +61,11 @@ class ModelManager:
 
                 return model_processor
             case "face_torch_export":
-                return ModelProcessor(FaceTorchExportModel(model_config))
+                role = str(model_config.get("face_model_role", "detection")).lower()
+                if role == "embedding":
+                    return ModelProcessor(AIFaceEmbeddingModel(model_config))
+                else:
+                    return ModelProcessor(AIFaceDetectionModel(model_config))
             case "python":
                 return ModelProcessor(PythonModel(model_config))
             case _:
