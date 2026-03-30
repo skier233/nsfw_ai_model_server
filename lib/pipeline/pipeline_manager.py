@@ -31,11 +31,23 @@ class PipelineManager:
                 raise e
             except Exception as e:
                 self.pipelines.pop(pipeline, None)
-                self.logger.error(f"Error loading pipeline {pipeline}: {e}")
-                self.logger.debug("Exception details:", exc_info=True)
+                error_msg = str(e)
+                if "No active AI models matched dynamic expansion filters" in error_msg:
+                    self.logger.warning(
+                        f"Pipeline '{pipeline}' skipped: no active models are available for one or more "
+                        f"dynamic stages (models may not be downloaded or not listed in active_ai_models). "
+                        f"Detail: {error_msg}"
+                    )
+                else:
+                    self.logger.error(f"Error loading pipeline {pipeline}: {e}")
+                    self.logger.debug("Exception details:", exc_info=True)
             
         if not self.pipelines:
             raise ServerStopException("Error: No valid pipelines loaded!")
+
+    def has_pipeline(self, pipeline_name) -> bool:
+        return pipeline_name in self.pipelines
+
     def get_pipeline(self, pipeline_name) -> Pipeline:
         if not pipeline_name in self.pipelines:
             self.logger.error(f"Error: Pipeline: {pipeline_name} not found in valid loaded pipelines!")

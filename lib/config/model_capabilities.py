@@ -19,6 +19,133 @@ class ModelCapabilitiesConfig:
     def set_known_pipelines(self, pipelines: Optional[Iterable[str]]):
         self.known_pipelines = set(_normalize_string_list(pipelines))
 
+    def prune_unavailable_models(self):
+        """Remove references to models not in active_model_library from the in-memory config.
+
+        Mutates self.config (does NOT touch any file on disk). Called before validate() so that
+        non-technical users who haven't downloaded optional models (e.g. face models) get graceful
+        degradation to tagging-only rather than a fatal startup error.
+
+        Pruning rules:
+        - detector_models entries not in active_model_library → warned + removed.
+        - region_models keys whose detector was pruned → warned + removed (orphan elimination).
+        - individual region model names not in active_model_library → warned + removed; if the
+          resulting list is empty the whole region rule is removed.
+        - explicit full_image_models list entries not in active_model_library → warned + removed;
+          if the list becomes empty it is replaced with "ALL".
+        """
+        if not isinstance(self.config, dict):
+            return
+
+        for pipeline_name, raw_entry in list(self.config.items()):
+            if not isinstance(raw_entry, dict):
+                continue
+
+            # --- detector_models pruning ---
+            detector_models = _normalize_string_list(raw_entry.get("detector_models", []))
+            pruned_detectors = []
+            removed_detectors = set()
+            for name in detector_models:
+                if name in self.active_model_library:
+                    pruned_detectors.append(name)
+                else:
+                    self.logger.warning(
+                        f"model_capabilities: pipeline '{pipeline_name}' detector_models references "
+                        f"'{name}' which is not in active_ai_models — removing from pipeline (model not downloaded or not active)."
+                    )
+                    removed_detectors.add(name)
+
+            if removed_detectors:
+                raw_entry["detector_models"] = pruned_detectors
+
+            # --- region_models pruning ---
+            region_model_map = raw_entry.get("region_models", {}) or {}
+            if isinstance(region_model_map, dict) and region_model_map:
+                pruned_region_map = {}
+                for detector_key, region_value in region_model_map.items():
+                    detector_key_norm = str(detector_key).strip()
+
+                    # Remove orphaned rules whose triggering detector was just pruned
+                    if detector_key_norm in removed_detectors:
+                        self.logger.warning(
+                            f"model_capabilities: pipeline '{pipeline_name}' region_models['{detector_key_norm}'] "
+                            f"removed because its detector '{detector_key_norm}' was pruned."
+                        )
+                        continue
+
+                    # For remaining rules prune individual missing model names
+                    if isinstance(region_value, dict):
+                        # label_models form: {label: [model, ...], ...}
+                        pruned_label_models = {}
+                        for label, label_model_names in region_value.items():
+                            available = []
+                            for m in _normalize_string_list(label_model_names):
+                                if m in self.active_model_library:
+                                    available.append(m)
+                                else:
+                                    self.logger.warning(
+                                        f"model_capabilities: pipeline '{pipeline_name}' "
+                                        f"region_models['{detector_key_norm}']['{label}'] references "
+                                        f"'{m}' which is not in active_ai_models — removing."
+                                    )
+                            if available:
+                                pruned_label_models[label] = available
+                            else:
+                                self.logger.warning(
+                                    f"model_capabilities: pipeline '{pipeline_name}' "
+                                    f"region_models['{detector_key_norm}']['{label}'] has no remaining models — removing label rule."
+                                )
+                        if pruned_label_models:
+                            pruned_region_map[detector_key_norm] = pruned_label_models
+                        else:
+                            self.logger.warning(
+                                f"model_capabilities: pipeline '{pipeline_name}' region_models['{detector_key_norm}'] "
+                                f"has no remaining label rules — removing region rule entirely."
+                            )
+                    else:
+                        # flat list form: [model, ...]
+                        model_names = _normalize_string_list(region_value)
+                        available = []
+                        for m in model_names:
+                            if m in self.active_model_library:
+                                available.append(m)
+                            else:
+                                self.logger.warning(
+                                    f"model_capabilities: pipeline '{pipeline_name}' "
+                                    f"region_models['{detector_key_norm}'] references "
+                                    f"'{m}' which is not in active_ai_models — removing."
+                                )
+                        if available:
+                            pruned_region_map[detector_key_norm] = available
+                        else:
+                            self.logger.warning(
+                                f"model_capabilities: pipeline '{pipeline_name}' region_models['{detector_key_norm}'] "
+                                f"has no remaining models — removing region rule entirely."
+                            )
+
+                raw_entry["region_models"] = pruned_region_map
+
+            # --- full_image_models pruning (explicit list only; ALL variants handled at runtime) ---
+            full_image_raw = raw_entry.get("full_image_models", None)
+            if isinstance(full_image_raw, list):
+                available = []
+                for name in _normalize_string_list(full_image_raw):
+                    if name in self.active_model_library:
+                        available.append(name)
+                    else:
+                        self.logger.warning(
+                            f"model_capabilities: pipeline '{pipeline_name}' full_image_models references "
+                            f"'{name}' which is not in active_ai_models — removing."
+                        )
+                if not available and full_image_raw:
+                    self.logger.warning(
+                        f"model_capabilities: pipeline '{pipeline_name}' full_image_models list is now empty "
+                        f"after pruning — falling back to ALL."
+                    )
+                    raw_entry["full_image_models"] = "ALL"
+                else:
+                    raw_entry["full_image_models"] = available
+
     def validate(self):
         if not isinstance(self.config, dict):
             raise ValueError("model_capabilities config must be a mapping of pipeline_name -> capability settings")
@@ -110,6 +237,10 @@ class ModelCapabilitiesConfig:
 
         if stage_name == "full_image":
             full_image_models = entry.get("full_image_models", "ALL")
+            # Explicit empty list means "no full-image models" (e.g. face-only pipelines)
+            # Return [] to distinguish from "not configured" (None)
+            if isinstance(full_image_models, list) and len(full_image_models) == 0:
+                return []
             resolved = self._resolve_full_image_model_names(full_image_models, available_models)
             return resolved if resolved else None
 

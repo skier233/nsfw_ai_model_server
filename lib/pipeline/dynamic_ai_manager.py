@@ -37,6 +37,7 @@ class DynamicAIManager:
 
     def set_known_pipelines(self, pipeline_names):
         self.model_capabilities.set_known_pipelines(pipeline_names)
+        self.model_capabilities.prune_unavailable_models()
         self.model_capabilities.validate()
 
     def load(self):
@@ -71,12 +72,25 @@ class DynamicAIManager:
             model_config=model_config,
         )
         if len(selected_models) == 0:
-            requested_caps = _normalize_string_list(required_capabilities)
-            requested_scope = required_scope or "any"
-            raise ValueError(
-                f"Error: No active AI models matched dynamic expansion filters "
-                f"(capabilities={requested_caps or ['any']}, scope={requested_scope})"
-            )
+            # Face-only (or detector-only) pipelines have no full-image
+            # tagging models but DO have detector + region models.  Allow
+            # empty selection when region branches are configured.
+            has_region_branches = False
+            if pipeline_name:
+                _det_names = self.model_capabilities.resolve_model_names_for_stage(
+                    pipeline_name=pipeline_name,
+                    stage="detector",
+                    available_models=self.models,
+                )
+                _region_rules = self.model_capabilities.get_region_model_rules(pipeline_name)
+                has_region_branches = bool(_det_names) and bool(_region_rules)
+            if not has_region_branches:
+                requested_caps = _normalize_string_list(required_capabilities)
+                requested_scope = required_scope or "any"
+                raise ValueError(
+                    f"Error: No active AI models matched dynamic expansion filters "
+                    f"(capabilities={requested_caps or ['any']}, scope={requested_scope})"
+                )
 
         normalized_mode = (mode or "").lower()
         if normalized_mode == "video":
@@ -132,17 +146,30 @@ class DynamicAIManager:
 
     def _create_dynamic_video_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
         model_wrappers = []
-        video_preprocessor = self.model_manager.get_or_create_model("video_preprocessor_dynamic")
+        # Each pipeline gets its own preprocessor instance so per-pipeline
+        # settings (skip_base_frame, extra_frame_specs, etc.) don't clash.
+        if pipeline_name:
+            _preproc_alias = f"video_preprocessor_dynamic__{pipeline_name}"
+            video_preprocessor = self.model_manager.get_or_create_model_alias("video_preprocessor_dynamic", _preproc_alias)
+        else:
+            video_preprocessor = self.model_manager.get_or_create_model("video_preprocessor_dynamic")
         image_size, norm_config = self._resolve_preprocess_settings(models)
         video_preprocessor.model.image_size = image_size
         video_preprocessor.model.normalization_config = norm_config
 
-        # Pre-scan detectors: if any detector has region branches, add a
-        # single extra output for the original-resolution raw frame.  Both
-        # detectors (which handle their own internal 640-resize with correct
-        # aspect ratio) and region builders (which crop/align subimages at
-        # full resolution) share this tensor.
-        _region_frame_key = None   # set once when first detector is found
+        # When the pipeline has no full-image (tagging) models the base
+        # classification frame is never consumed.  Tell the preprocessor
+        # to skip storing it so we don't waste memory on every frame.
+        has_tagging_models = len(models) > 0
+        video_preprocessor.model.skip_base_frame = not has_tagging_models
+
+        # Pre-scan detectors: if any detector has region branches, add
+        # extra outputs for the original-resolution raw frame (CPU) and a
+        # pre-resized detector-input frame (GPU).  The region source stays
+        # on CPU for face cropping/alignment; the detector frame is small
+        # (~640 long-edge) and stays on GPU for fast inference.
+        _region_frame_key = None
+        _detector_frame_key = None
         _extra_frame_specs = []
         preproc_outputs = [
             "dynamic_children", "dynamic_frame", "frame_index",
@@ -156,16 +183,38 @@ class DynamicAIManager:
                 available_models=self.models,
             )
             if _prescan_detector_names:
-                # One original-resolution raw frame output shared by all
-                # detectors and region branches.
+                # 1) Region source: capped to ~1080p on CPU for face cropping/alignment
                 _region_frame_key = "dynamic_frame__region_source"
-                out_idx = len(preproc_outputs)
+                region_out_idx = len(preproc_outputs)
                 preproc_outputs.append(_region_frame_key)
+                try:
+                    _region_max_edge = int(os.environ.get("REGION_SOURCE_MAX_LONG_EDGE", "1920"))
+                except (ValueError, TypeError):
+                    _region_max_edge = 1920
                 _extra_frame_specs.append({
-                    "output_index": out_idx,
-                    "image_size": 0,     # no resize — keep original frame resolution
-                    "norm_config": -1,   # raw [0-255] pixels
+                    "output_index": region_out_idx,
+                    "image_size": 0,
+                    "norm_config": -1,
                     "use_half": False,
+                    "max_long_edge": _region_max_edge,
+                    "force_cpu": True,
+                })
+
+                # 2) Detector input: capped to ~640 long-edge on GPU
+                _detector_frame_key = "dynamic_frame__detector_input"
+                det_out_idx = len(preproc_outputs)
+                preproc_outputs.append(_detector_frame_key)
+                try:
+                    _det_max_edge = int(os.environ.get("DETECTOR_MAX_LONG_EDGE", "640"))
+                except (ValueError, TypeError):
+                    _det_max_edge = 640
+                _extra_frame_specs.append({
+                    "output_index": det_out_idx,
+                    "image_size": 0,
+                    "norm_config": -1,
+                    "use_half": False,
+                    "max_long_edge": _det_max_edge,
+                    "force_cpu": False,
                 })
 
         video_preprocessor.model.extra_frame_specs = _extra_frame_specs
@@ -195,17 +244,17 @@ class DynamicAIManager:
                     detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
                     additional_coalesce_inputs.extend(detector_outputs)
 
-                    # All detectors receive the original-resolution raw frame.
-                    # run_detection() inside each model handles its own resize
-                    # to the model’s det_size (e.g. 640×640) with correct
-                    # aspect-ratio preservation and produces bboxes/kps in
-                    # original-frame coordinates.
-                    detector_frame_key = _region_frame_key or "dynamic_frame"
+                    # Detectors receive the pre-resized GPU frame for
+                    # fast inference.  run_detection() handles the final
+                    # 640×640 pad internally (near-no-op when input is
+                    # already ~640 long-edge).
+                    det_input_key = _detector_frame_key or _region_frame_key or "dynamic_frame"
+                    region_source_key = _region_frame_key or det_input_key
 
                     model_wrappers.append(
                         ModelWrapper(
                             detector_model,
-                            [detector_frame_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
+                            [det_input_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
                             detector_outputs,
                         )
                     )
@@ -252,21 +301,24 @@ class DynamicAIManager:
                     return_confidence_key = f"dynamic_return_confidence__{alias}"
                     skipped_categories_key = f"dynamic_skipped_categories__{alias}"
                     region_result_key = f"dynamic_region_result__{alias}"
-                    region_results_key = f"dynamic_region_results__{alias}"
+                    region_results_key = f"regions__{alias}"
+                    detection_index_key = f"detection_index__{alias}"
+                    region_coalesce_index_key = "detection_index"
 
                     model_wrappers.append(
                         ModelWrapper(
                             self.model_manager.get_or_create_model("detector_result_to_region_targets"),
-                            [detector_output_key, "frame_index", detector_frame_key, "frame_index"],
+                            [detector_output_key, "frame_index", region_source_key, "frame_index"]
+                            + ([det_input_key] if det_input_key != region_source_key else []),
                             [region_targets_key, region_errors_key],
                         )
                     )
 
-                    # Region source is the original-resolution raw frame.
+                    # Region source is the full-resolution CPU frame.
                     model_wrappers.append(
                         ModelWrapper(
                             self.model_manager.get_or_create_model("region_children_builder"),
-                            [detector_frame_key, region_targets_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
+                            [region_source_key, region_targets_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
                             [
                                 children_key,
                                 region_image_key,
@@ -275,6 +327,7 @@ class DynamicAIManager:
                                 return_confidence_key,
                                 skipped_categories_key,
                                 f"dynamic_region_source__{alias}",
+                                region_coalesce_index_key,
                             ],
                         )
                     )
@@ -295,7 +348,7 @@ class DynamicAIManager:
                     model_wrappers.append(
                         ModelWrapper(
                             self.model_manager.get_or_create_model("result_coalescer"),
-                            [region_target_key] + region_branch_outputs,
+                            [region_coalesce_index_key] + region_branch_outputs,
                             [region_result_key],
                         )
                     )
@@ -316,7 +369,9 @@ class DynamicAIManager:
                         )
                     )
 
-                    additional_coalesce_inputs.extend([region_targets_key, region_errors_key, region_results_key])
+                    # Only include the formatted region results in parent coalescer;
+                    # region_targets and region_errors are internal plumbing.
+                    additional_coalesce_inputs.append(region_results_key)
 
         # coalesce all the ai results
         coalesce_inputs = self._build_coalesce_inputs(models)
@@ -338,10 +393,23 @@ class DynamicAIManager:
 
     def _create_dynamic_image_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
         model_wrappers = []
-        image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
+        # Each pipeline gets its own preprocessor instance so per-pipeline
+        # settings (skip_base_output, region_source_max_long_edge, etc.)
+        # don't clash.
+        if pipeline_name:
+            _preproc_alias = f"image_preprocessor_dynamic__{pipeline_name}"
+            image_preprocessor = self.model_manager.get_or_create_model_alias("image_preprocessor_dynamic", _preproc_alias)
+        else:
+            image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
         image_size, norm_config = self._resolve_preprocess_settings(models)
         image_preprocessor.model.image_size = image_size
         image_preprocessor.model.normalization_config = norm_config
+
+        # When the pipeline has no full-image (tagging) models the
+        # classification tensor is never consumed.  Tell the preprocessor
+        # to skip emitting it so we don't waste memory.
+        has_tagging_models = len(models) > 0
+        image_preprocessor.model.skip_base_output = not has_tagging_models
 
         # ── Peek ahead: do we need a region-source (raw) tensor? ──
         # If detectors + region models are configured we produce the raw
@@ -362,6 +430,12 @@ class DynamicAIManager:
 
         if _needs_region_source:
             _region_source_key = "dynamic_image__region_source"
+            # Cap region-source to ~1080p to avoid holding 4K+ tensors.
+            try:
+                _region_max_edge = int(os.environ.get("REGION_SOURCE_MAX_LONG_EDGE", "1920"))
+            except (ValueError, TypeError):
+                _region_max_edge = 1920
+            image_preprocessor.model.region_source_max_long_edge = _region_max_edge
             model_wrappers.append(
                 ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image", _region_source_key])
             )
@@ -441,7 +515,12 @@ class DynamicAIManager:
                 return_confidence_key = f"dynamic_return_confidence__{alias}"
                 skipped_categories_key = f"dynamic_skipped_categories__{alias}"
                 region_result_key = f"dynamic_region_result__{alias}"
-                region_results_key = f"face_region_results__{alias}"
+                region_results_key = f"regions__{alias}"
+                detection_index_key = f"detection_index__{alias}"
+                # The region coalescer operates per-child (one region, one
+                # detector) so it uses clean names without the alias suffix.
+                # These become the dict keys in the API response.
+                region_coalesce_index_key = "detection_index"
 
                 # Region source is the original-resolution image.
                 # Detection coords (bboxes, kps) are already in original
@@ -468,6 +547,7 @@ class DynamicAIManager:
                             return_confidence_key,
                             skipped_categories_key,
                             f"dynamic_region_source__{alias}",
+                            region_coalesce_index_key,
                         ],
                     )
                 )
@@ -488,7 +568,7 @@ class DynamicAIManager:
                 model_wrappers.append(
                     ModelWrapper(
                         self.model_manager.get_or_create_model("result_coalescer"),
-                        [region_target_key] + region_branch_outputs,
+                        [region_coalesce_index_key] + region_branch_outputs,
                         [region_result_key],
                     )
                 )
@@ -509,7 +589,9 @@ class DynamicAIManager:
                     )
                 )
 
-                additional_coalesce_inputs.extend([region_targets_key, region_errors_key, region_results_key])
+                # Only include the formatted region results in parent coalescer;
+                # region_targets and region_errors are internal plumbing.
+                additional_coalesce_inputs.append(region_results_key)
 
         # coalesce all the ai results
         coalesce_inputs = self._build_coalesce_inputs(models)
@@ -537,6 +619,7 @@ class DynamicAIManager:
                     "dynamic_return_confidence",
                     "dynamic_skipped_categories",
                     "dynamic_region_source",
+                    "dynamic_detection_index",
                 ],
             )
         )
@@ -551,9 +634,12 @@ class DynamicAIManager:
                 )
             )
 
-        # Coalesce per-region results and keep region target metadata attached.
+        # Coalesce per-region results: detection_index for correlation + model outputs.
+        # The full region target stays in the child future data for models that
+        # need it (e.g. face alignment reads kps), but is not included in the
+        # coalesced output.
         coalesce_inputs = self._build_coalesce_inputs(models)
-        coalesce_inputs.insert(0, "dynamic_region_target")
+        coalesce_inputs.insert(0, "dynamic_detection_index")
         model_wrappers.append(
             ModelWrapper(
                 self.model_manager.get_or_create_model("result_coalescer"),

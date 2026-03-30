@@ -30,7 +30,6 @@ async def result_coalescer(data):
                     {
                         "model_step": input_name,
                         "status": "skipped",
-                        "payload": None,
                     }
                 )
                 continue
@@ -41,7 +40,6 @@ async def result_coalescer(data):
                     {
                         "model_step": input_name,
                         "status": "error",
-                        "payload": None,
                         "error": error_text,
                     }
                 )
@@ -53,7 +51,6 @@ async def result_coalescer(data):
                 {
                     "model_step": input_name,
                     "status": "ok",
-                    "payload": ai_result,
                 }
             )
 
@@ -121,6 +118,12 @@ async def _join_child_futures(parent_future, child_futures, output_name):
         for result in results:
             if isinstance(result, Exception):
                 normalized_results.append({"_error": str(result), "_status": "error"})
+            elif isinstance(result, dict):
+                # Strip pipeline-internal keys (_outputs, _errors) from child
+                # results before they become part of the parent response.
+                normalized_results.append(
+                    {k: v for k, v in result.items() if not isinstance(k, str) or not k.startswith("_")}
+                )
             else:
                 normalized_results.append(result)
 
@@ -157,14 +160,19 @@ async def video_result_postprocessor_v3(data):
         currently_active_models = pipeline.get_ai_models_info()
 
         raw_frames = itemFuture[item.input_names[0]]
-        clean_frames, frame_structured_outputs, frame_errors = _extract_structured_frames(raw_frames)
+        clean_frames, _, _ = _extract_structured_frames(raw_frames)
         timespan_frames = _filter_timespan_compatible_frames(clean_frames)
+        per_frame_data = _extract_per_frame_data(clean_frames)
+
+        raw_frame_interval = itemFuture[item.input_names[2]]
+        raw_threshold = itemFuture[item.input_names[3]]
 
         result = {
             "frames": timespan_frames,
+            "per_frame_data": per_frame_data,
             "video_duration": duration,
-            "frame_interval": float(itemFuture[item.input_names[2]]),
-            "threshold": float(itemFuture[item.input_names[3]]),
+            "frame_interval": float(raw_frame_interval) if raw_frame_interval is not None else 0.5,
+            "threshold": float(raw_threshold) if raw_threshold is not None else 0.5,
             "ai_models_info": currently_active_models,
             "skipped_categories": itemFuture[item.input_names[4]],
         }
@@ -198,18 +206,7 @@ async def video_result_postprocessor_v3(data):
         total_runtime = metrics.get("preprocess_seconds", 0.0) + metrics.get("ai_inference_seconds", 0.0)
         metrics["total_runtime_seconds"] = total_runtime
 
-        results_v2 = {
-            "assets": [
-                {
-                    "asset_id": str(itemFuture[item.input_names[1]]),
-                    "frames": frame_structured_outputs,
-                    "errors": frame_errors,
-                }
-            ],
-            "errors": frame_errors,
-        }
-
-        payload = {"result": videoResult, "results_v2": results_v2, "metrics": metrics}
+        payload = {"result": videoResult, "metrics": metrics}
 
         await itemFuture.set_data(item.output_names[0], payload)
 
@@ -327,6 +324,8 @@ async def detector_result_to_region_targets(data):
         frame_index = None
         source_tensor = None
         parent_target_id = None
+        bbox_scale_x = 1.0
+        bbox_scale_y = 1.0
 
         if len(item.input_names) > 2:
             third_input = itemFuture[item.input_names[2]]
@@ -345,9 +344,22 @@ async def detector_result_to_region_targets(data):
                 parent_target_id = fourth_input
 
         if len(item.input_names) > 4:
-            parent_target_id = itemFuture[item.input_names[4]]
+            fifth_input = itemFuture[item.input_names[4]]
+            if not isinstance(fifth_input, torch.Tensor):
+                parent_target_id = fifth_input
 
         source_height, source_width = _extract_tensor_hw(source_tensor)
+
+        # Compute bbox scale AFTER source dimensions are known.
+        if len(item.input_names) > 4:
+            fifth_input = itemFuture[item.input_names[4]]
+            if isinstance(fifth_input, torch.Tensor):
+                det_h, det_w = _extract_tensor_hw(fifth_input)
+                if (det_h and det_w and source_height and source_width
+                        and (det_h != source_height or det_w != source_width)):
+                    bbox_scale_x = source_width / det_w
+                    bbox_scale_y = source_height / det_h
+
         candidate_detections = _extract_detection_items(detections)
 
         if max_targets_per_item > 0 and len(candidate_detections) > max_targets_per_item:
@@ -380,6 +392,16 @@ async def detector_result_to_region_targets(data):
                 )
                 continue
 
+            # Scale bbox from detector-input space to region-source space
+            if bbox_scale_x != 1.0 or bbox_scale_y != 1.0:
+                bbox = [bbox[0] * bbox_scale_x, bbox[1] * bbox_scale_y,
+                        bbox[2] * bbox_scale_x, bbox[3] * bbox_scale_y]
+
+            # Scale kps similarly
+            kps_raw = detection.get("kps") if isinstance(detection, dict) else None
+            if kps_raw and (bbox_scale_x != 1.0 or bbox_scale_y != 1.0):
+                kps_raw = [[x * bbox_scale_x, y * bbox_scale_y] for x, y in kps_raw]
+
             try:
                 target = build_region_target(
                     source_asset_id=str(source_asset_id),
@@ -390,7 +412,7 @@ async def detector_result_to_region_targets(data):
                     source_height=source_height,
                     metadata={
                         "detection_index": detection_index,
-                        "detector_payload": detection,
+                        "kps": kps_raw,
                     },
                 )
                 region_targets.append(target)
@@ -402,6 +424,36 @@ async def detector_result_to_region_targets(data):
                         "raw_detection": detection,
                     }
                 )
+
+        # Write client-safe detections (without kps, with normalized bbox) back
+        # to the detection key.  Downstream steps (region_children_builder,
+        # embedding models) already extracted kps/bbox into region-target
+        # metadata, so the original value is no longer needed.  Direct
+        # mutation avoids re-triggering the pipeline event handler — safe
+        # because the detection key has already been consumed by this step.
+        if itemFuture.data is not None:
+            can_normalize = (source_width is not None and source_height is not None
+                             and source_width > 0 and source_height > 0)
+            client_detections = []
+            for det in candidate_detections:
+                if isinstance(det, dict):
+                    client_det = {k: v for k, v in det.items() if k != "kps"}
+                    if can_normalize and "bbox" in client_det:
+                        bx1, by1, bx2, by2 = client_det["bbox"]
+                        # Scale from detector-input space to region-source
+                        # space before normalising to 0–1.
+                        bx1 *= bbox_scale_x; by1 *= bbox_scale_y
+                        bx2 *= bbox_scale_x; by2 *= bbox_scale_y
+                        client_det["bbox"] = [
+                            max(0.0, min(1.0, bx1 / source_width)),
+                            max(0.0, min(1.0, by1 / source_height)),
+                            max(0.0, min(1.0, bx2 / source_width)),
+                            max(0.0, min(1.0, by2 / source_height)),
+                        ]
+                    client_detections.append(client_det)
+                else:
+                    client_detections.append(det)
+            itemFuture.data[item.input_names[0]] = client_detections
 
         await itemFuture.set_data(item.output_names[0], targets_to_dicts(region_targets))
         if len(item.output_names) > 1:
@@ -430,6 +482,14 @@ async def region_children_builder(data):
             if bbox is None:
                 continue
 
+            # Extract detection_index for correlation; the full region
+            # target stays available for models that need it (e.g. kps
+            # for face alignment) but won't be coalesced into the result.
+            det_index = None
+            if isinstance(region_target, dict):
+                meta = region_target.get("metadata") or {}
+                det_index = meta.get("detection_index")
+
             crop_tensor = _crop_and_resize_region(source_tensor, bbox)
             payload = {
                 item.output_names[1]: crop_tensor,
@@ -440,8 +500,19 @@ async def region_children_builder(data):
             }
             if len(item.output_names) > 6:
                 payload[item.output_names[6]] = source_tensor
+            if len(item.output_names) > 7:
+                payload[item.output_names[7]] = det_index
             child_future = await ItemFuture.create(item, payload, item.item_future.handler)
             children.append(child_future)
+
+        # Release the parent frame's reference to the full-resolution
+        # source tensor.  Children that need it (face alignment) already
+        # hold their own reference.  Clearing it here allows GC to reclaim
+        # the large tensor as soon as all children finish with it.
+        if itemFuture.data is not None:
+            src_key = item.input_names[0]
+            if src_key in itemFuture.data:
+                itemFuture.data[src_key] = None
 
         await itemFuture.set_data(item.output_names[0], children)
 
@@ -461,8 +532,6 @@ def _extract_detection_items(detections):
     if isinstance(detections, dict):
         if "detections" in detections and isinstance(detections["detections"], list):
             return detections["detections"]
-        if "face_detections" in detections and isinstance(detections["face_detections"], list):
-            return detections["face_detections"]
         for value in detections.values():
             if isinstance(value, list) and value:
                 first = value[0]
@@ -509,7 +578,9 @@ def _crop_and_resize_region(source_tensor: torch.Tensor, bbox: Sequence[float]) 
     if x2 <= x1 or y2 <= y1:
         raise ValueError("Invalid bbox after clamping; zero-area crop")
 
-    cropped = tensor[..., y1:y2, x1:x2]
+    # .clone() to own memory independently of the source tensor so
+    # the full-resolution source can be garbage-collected promptly.
+    cropped = tensor[..., y1:y2, x1:x2].clone()
     if squeeze:
         cropped = cropped.squeeze(0)
     return cropped
@@ -569,6 +640,21 @@ def _extract_structured_frames(raw_frames):
     return clean_frames, frame_structured_outputs, frame_errors
 
 
+def _is_tag_list(value):
+    """Return True if *value* looks like a tagging model output (list of
+    strings or (string, float) tuples) suitable for timespan building.
+    An empty list is considered a valid (empty) tag list."""
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if isinstance(item, str):
+            continue
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+            continue
+        return False
+    return True
+
+
 def _filter_timespan_compatible_frames(frames):
     filtered_frames = []
     for frame_index, frame in enumerate(frames or []):
@@ -579,21 +665,39 @@ def _filter_timespan_compatible_frames(frames):
         for key, value in frame.items():
             if key == "frame_index":
                 continue
-            if not isinstance(value, list):
-                continue
-
-            normalized_items = []
-            for item in value:
-                if isinstance(item, str):
-                    normalized_items.append(item)
-                    continue
-                if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
-                    normalized_items.append(item)
-                    continue
-
-            if normalized_items:
-                filtered[key] = normalized_items
+            if value and _is_tag_list(value):
+                filtered[key] = value
 
         filtered_frames.append(filtered)
 
     return filtered_frames
+
+
+def _extract_per_frame_data(clean_frames):
+    """Extract non-tag per-frame data (detections, regions, etc.).
+
+    Returns a list of dicts, each containing ``frame_index`` plus any
+    keys whose values are *not* tag lists (i.e. structured data like
+    detection dicts or region result lists).  Frames with no such data
+    are omitted to keep the payload compact."""
+    per_frame = []
+    for frame_index, frame in enumerate(clean_frames or []):
+        if not isinstance(frame, dict):
+            continue
+
+        entry = {"frame_index": frame.get("frame_index", frame_index)}
+        for key, value in frame.items():
+            if key == "frame_index":
+                continue
+            # Skip tag lists (handled by timespans), None, and empty values.
+            if not value:
+                continue
+            if _is_tag_list(value):
+                continue
+            entry[key] = value
+
+        # Only include if there's actual structured data beyond frame_index.
+        if len(entry) > 1:
+            per_frame.append(entry)
+
+    return per_frame

@@ -21,7 +21,14 @@ DEFAULT_MODEL_CAPABILITIES_CONFIG = {
         "full_image_models": [],
         "detector_models": ["face_detector_torchexport"],
         "region_models": {
-            "face_detections": ["face_embedding_torchexport"],
+            "face_detector_torchexport": ["face_embedding_torchexport"],
+        },
+    },
+    "video_pipeline_face_recognition_v1": {
+        "full_image_models": [],
+        "detector_models": ["face_detector_torchexport"],
+        "region_models": {
+            "face_detector_torchexport": ["face_embedding_torchexport"],
         },
     },
 }

@@ -53,6 +53,11 @@ class AIFaceEmbeddingModel(AIModel):
             raise ValueError("Embedding face model expects tensor input")
 
         aligned_image = self._try_aligned_face_image(item_future)
+        # Eagerly release the full-resolution source tensor from this
+        # child future now that alignment has been resolved.  This allows
+        # GC to free the large tensor as soon as all sibling regions for
+        # the same frame have finished.
+        _clear_region_source(item_future)
         if aligned_image is not None:
             image = aligned_image
         else:
@@ -77,8 +82,7 @@ class AIFaceEmbeddingModel(AIModel):
                 return None
 
             metadata = region_target.get("metadata") or {}
-            detector_payload = metadata.get("detector_payload") or {}
-            kps = detector_payload.get("kps")
+            kps = metadata.get("kps")
             kps = _normalize_kps(kps)
             if kps is None:
                 return None
@@ -91,6 +95,18 @@ class AIFaceEmbeddingModel(AIModel):
 # ---------------------------------------------------------------------------
 # Embedding / alignment helpers (moved from face_torch_export_model.py)
 # ---------------------------------------------------------------------------
+
+def _clear_region_source(item_future):
+    """Eagerly release the full-resolution source tensor from a child
+    ItemFuture so the large tensor can be garbage-collected as soon as
+    all sibling regions for the same frame have finished."""
+    data = getattr(item_future, 'data', None)
+    if data is None:
+        return
+    for key in list(data.keys()):
+        if isinstance(key, str) and key.startswith("dynamic_region_source"):
+            data[key] = None
+
 
 def _ensure_model_rgb_gpu(tensor: torch.Tensor) -> torch.Tensor:
     """Ensure tensor is [0, 255] float RGB CHW, staying on the same device."""

@@ -23,6 +23,14 @@ class VideoPreprocessorModel(Model):
         self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
 
+        # When True the preprocessor skips the base frame transform
+        # (resize + normalize for tagging models) and only produces the
+        # frames described by extra_frame_specs.  The base output slot
+        # (output_names[1]) is set to None so no memory is wasted.
+        # The dynamic_ai_manager sets this when the pipeline has no
+        # full-image (tagging) models.
+        self.skip_base_frame = False
+
         # Extra per-model frame specs set by the dynamic AI manager.
         # Each entry: {"output_index": int, "image_size": int,
         #              "norm_config": int, "use_half": bool}
@@ -102,19 +110,50 @@ class VideoPreprocessorModel(Model):
                             apply_resize=(spec["image_size"] > 0),
                             scale_values=(not s_raw),
                         )
-                        _extra_transforms.append((spec["output_index"], s_xform))
+                        _extra_transforms.append((
+                            spec["output_index"],
+                            s_xform,
+                            spec.get("max_long_edge", 0),
+                            spec.get("force_cpu", False),
+                            _resolve_device if not spec.get("force_cpu", False) else None,
+                        ))
+
+                # When skip_base_frame is set we don't need the
+                # classification tensor at all — only the raw CHW base.
+                # Use CPU device and raw mode so we skip the expensive
+                # GPU transfer + resize + normalise per frame.
+                _preproc_device = self.device
+                _preproc_img_size = self.image_size
+                _preproc_norm = norm_config
+                if self.skip_base_frame and include_base:
+                    _preproc_device = 'cpu'
+                    _preproc_img_size = 0
+                    _preproc_norm = -1
+
+                # Compute the maximum resolution anything downstream
+                # actually needs.  If all consumers have a max_long_edge
+                # cap we can tell FFmpeg to downscale during decode —
+                # dramatically reducing per-frame data size.
+                _max_decode_long_edge = 0
+                if include_base and self.skip_base_frame:
+                    # No classification frame needed → decode only needs
+                    # to cover the largest extra spec cap.
+                    _spec_edges = [s.get("max_long_edge", 0) for s in _extra_specs]
+                    if _spec_edges and all(e > 0 for e in _spec_edges):
+                        _max_decode_long_edge = max(_spec_edges)
 
                 try:
                     frame_source = preprocess_callable(
                         input_data,
                         frame_interval,
-                        self.image_size,
+                        _preproc_img_size,
                         self.use_half_precision,
-                        self.device,
+                        _preproc_device,
                         use_timestamps,
                         vr_video=vr_video,
-                        norm_config=norm_config,
+                        norm_config=_preproc_norm,
                         include_raw=include_base,
+                        max_decode_long_edge=_max_decode_long_edge,
                     )
                 except Exception as exc:
                     if preprocess_callable is preprocess_video_deffcode_gpu:
@@ -128,13 +167,14 @@ class VideoPreprocessorModel(Model):
                         frame_source = preprocess_callable(
                             input_data,
                             frame_interval,
-                            self.image_size,
+                            _preproc_img_size,
                             self.use_half_precision,
-                            self.device,
+                            _preproc_device,
                             use_timestamps,
                             vr_video=vr_video,
-                            norm_config=norm_config,
+                            norm_config=_preproc_norm,
                             include_raw=include_base,
+                            max_decode_long_edge=_max_decode_long_edge,
                         )
                     elif preprocess_callable is preprocess_video_deffcode:
                         self.logger.warning(
@@ -147,13 +187,14 @@ class VideoPreprocessorModel(Model):
                         frame_source = preprocess_callable(
                             input_data,
                             frame_interval,
-                            self.image_size,
+                            _preproc_img_size,
                             self.use_half_precision,
-                            self.device,
+                            _preproc_device,
                             use_timestamps,
                             vr_video=vr_video,
-                            norm_config=norm_config,
+                            norm_config=_preproc_norm,
                             include_raw=include_base,
+                            max_decode_long_edge=_max_decode_long_edge,
                         )
                     else:
                         raise
@@ -173,18 +214,46 @@ class VideoPreprocessorModel(Model):
                         frame = frame_data[1]
 
                         payload = {
-                            item.output_names[1]: frame,
                             item.output_names[2]: frame_index,
                             item.output_names[3]: itemFuture[item.input_names[3]],
                             item.output_names[4]: itemFuture[item.input_names[4]],
                             item.output_names[5]: itemFuture[item.input_names[6]],
                         }
+
+                        # Only store the base classification frame when
+                        # tagging models need it.  When skip_base_frame is
+                        # set (no full-image models in the pipeline) we
+                        # release it immediately to save memory.
+                        if not self.skip_base_frame:
+                            payload[item.output_names[1]] = frame
+                        del frame
+
                         # Apply model-resolution-matched transforms for each
                         # extra spec (e.g. face detector @ 640×640 [0-255]).
                         if include_base and len(frame_data) > 2:
                             base_tensor = frame_data[2]
-                            for out_idx, xform in _extra_transforms:
-                                payload[item.output_names[out_idx]] = xform(base_tensor.clone())
+                            for out_idx, xform, max_long_edge, force_cpu, target_device in _extra_transforms:
+                                t = xform(base_tensor.clone())
+                                # Aspect-ratio-preserving resize to cap memory.
+                                if max_long_edge and max_long_edge > 0:
+                                    h, w = t.shape[-2], t.shape[-1]
+                                    long_edge = max(h, w)
+                                    if long_edge > max_long_edge:
+                                        scale = max_long_edge / long_edge
+                                        new_h = max(1, int(round(h * scale)))
+                                        new_w = max(1, int(round(w * scale)))
+                                        t = torch.nn.functional.interpolate(
+                                            t.unsqueeze(0),
+                                            size=(new_h, new_w),
+                                            mode="bilinear",
+                                            align_corners=False,
+                                        ).squeeze(0)
+                                if force_cpu:
+                                    t = t.cpu()
+                                elif target_device is not None and t.device != target_device:
+                                    t = t.to(target_device)
+                                payload[item.output_names[out_idx]] = t
+                            del base_tensor  # release ref to raw frame immediately
                         result = await ItemFuture.create(item, payload, item.item_future.handler)
                         children.append(result)
                 finally:

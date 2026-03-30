@@ -391,15 +391,15 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
 
     # Read image via torchvision unless running on ROCm, where Pillow is needed for JPEGs.
     img = _load_image_tensor(image_path)
-    # Move to target device and run transforms
+
+    # Capture the raw original-resolution tensor on CPU *before* the GPU
+    # transfer so the full-resolution source never touches GPU memory.
+    # Downstream detection / alignment steps handle their own GPU
+    # transfer for the small tensors they need.
+    raw = img.float() if include_raw else None   # CPU — no GPU memory used
+
+    # Transfer to device for the classification transform
     img = img.to(device)
-
-    # Capture the raw original-resolution tensor *before* transforms touch it.
-    # torchvision v2 transforms return new tensors, so ``img`` stays intact
-    # after ``frame_transforms(img)`` — but we convert to float32 [0-255]
-    # eagerly so downstream consumers see a consistent dtype.
-    raw = img.float() if include_raw else None
-
     out = frame_transforms(img)
 
     if out.ndim != 3 or out.shape[0] != 3:
@@ -419,16 +419,24 @@ def preprocess_image(image_path, img_size=512, use_half_precision=True, device=N
     
 
 def _prepare_frame(frame, device, vr_video, frame_transforms, include_raw=False):
+    if include_raw:
+        # Keep the tensor on CPU so the raw capture never touches GPU.
+        # Only the classification tensor is transferred to the target
+        # device — the raw stays on CPU for downstream region processing.
+        tensor = _ensure_torch_tensor(frame, torch.device('cpu'))
+        if vr_video:
+            tensor = vr_permute(tensor)
+        tensor = tensor.permute(2, 0, 1)
+        raw = tensor.float()  # CPU — no GPU memory used
+        # Transfer only for the classification transform
+        if device is not None and device.type != 'cpu':
+            tensor = tensor.pin_memory().to(device, non_blocking=True)
+        return frame_transforms(tensor), raw
+
     tensor = _ensure_torch_tensor(frame, device, pin_memory=True, non_blocking=True)
-    
     if vr_video:
         tensor = vr_permute(tensor)
-    
     tensor = tensor.permute(2, 0, 1)
-    if include_raw:
-        # Capture raw CHW [0-255] float32 *before* normalisation/resize
-        raw = tensor.float()
-        return frame_transforms(tensor), raw
     return frame_transforms(tensor)
 
 
@@ -443,6 +451,7 @@ def preprocess_video(
     vr_video=False,
     norm_config=1,
     include_raw=False,
+    **_kwargs,
 ):
     """
     Preprocess video using decord (CPU-based).
@@ -595,6 +604,7 @@ def preprocess_video_deffcode_auto(
     vr_video=False,
     norm_config=1,
     include_raw=False,
+    max_decode_long_edge=0,
 ):
     """
     Automatically select GPU or CPU preprocessing based on video resolution and GPU availability.
@@ -667,6 +677,7 @@ def preprocess_video_deffcode_auto(
                 vr_video=vr_video,
                 norm_config=norm_config,
                 include_raw=include_raw,
+                max_decode_long_edge=max_decode_long_edge,
             ):
                 yielded_any = True
                 yield item
@@ -695,6 +706,7 @@ def preprocess_video_deffcode_auto(
         vr_video=vr_video,
         norm_config=norm_config,
         include_raw=include_raw,
+        max_decode_long_edge=max_decode_long_edge,
     )
 
 def preprocess_video_deffcode(
@@ -707,6 +719,7 @@ def preprocess_video_deffcode(
     vr_video=False,
     norm_config=1,
     include_raw=False,
+    max_decode_long_edge=0,
 ):
     """
     Preprocess video using CPU-based DeFFcode with FFmpeg filtering.
@@ -739,7 +752,7 @@ def preprocess_video_deffcode(
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=True,  # Always use PyTorch resize in CPU mode
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
     )
 
     # Build FFmpeg filter chain
@@ -769,9 +782,25 @@ def preprocess_video_deffcode(
     if frame_interval and frame_interval > 0 and source_fps:
         frame_step_frames = max(1, round(source_fps * frame_interval))
     
+    vf_parts = []
     if frame_step_frames > 1:
-        vf_filter = f"select='not(mod(n,{frame_step_frames}))'"
-        decoder_kwargs["-vf"] = vf_filter
+        vf_parts.append(f"select='not(mod(n,{frame_step_frames}))'")
+
+    # Downscale at FFmpeg level when max_decode_long_edge is set.
+    # This dramatically reduces per-frame data size before it reaches Python.
+    # Uses FFmpeg expressions: scale only if the source exceeds the cap.
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+    if _mdle > 0:
+        # scale='if(gt(max(iw,ih),CAP), if(gt(iw,ih), CAP, -2), iw)' : ...
+        # More readable: if long_edge > cap, scale down preserving aspect ratio.
+        vf_parts.append(
+            f"scale='if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(iw\\,ih)\\,{_mdle}\\,-2)\\,iw)'"
+            f":'if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(ih\\,iw)\\,{_mdle}\\,-2)\\,ih)'"
+            ":flags=bilinear"
+        )
+
+    if vf_parts:
+        decoder_kwargs["-vf"] = ",".join(vf_parts)
 
     decoder = decoder_cls(video_path, frame_format="rgb24", **decoder_kwargs).formulate()
 
@@ -814,6 +843,7 @@ def preprocess_video_deffcode_gpu(
     vr_video=False,
     norm_config=1,
     include_raw=False,
+    max_decode_long_edge=0,
 ):
     """
     Preprocess video using NVDEC hardware acceleration via DeFFcode.
@@ -838,7 +868,7 @@ def preprocess_video_deffcode_gpu(
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=True,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
     )
 
     # Probe metadata to determine the appropriate NVDEC decoder
@@ -894,6 +924,16 @@ def preprocess_video_deffcode_gpu(
             "format=nv12",
         ]
     )
+
+    # Downscale at FFmpeg level after hwdownload when max_decode_long_edge
+    # is set.  This reduces the per-frame data size before Python sees it.
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+    if _mdle > 0:
+        vf_filters.append(
+            f"scale='if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(iw\\,ih)\\,{_mdle}\\,-2)\\,iw)'"
+            f":'if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(ih\\,iw)\\,{_mdle}\\,-2)\\,ih)'"
+            ":flags=bilinear"
+        )
     # Let DeFFcode handle the final nv12->rgb24 conversion (faster than in filter chain)
     decoder_kwargs = {
         "-vcodec": hw_decoder,

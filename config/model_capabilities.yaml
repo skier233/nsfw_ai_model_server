@@ -1,0 +1,31 @@
+image_pipeline_dynamic_v3:
+  full_image_models: ALL
+  detector_models:
+    - face_detector_torchexport
+  region_models:
+    face_detector_torchexport:
+      - face_embedding_torchexport
+
+video_pipeline_dynamic_v3:
+  full_image_models: ALL
+  detector_models:
+    - face_detector_torchexport
+  region_models:
+    face_detector_torchexport:
+      - face_embedding_torchexport
+
+image_pipeline_face_embeddings_v1:
+  full_image_models: []
+  detector_models:
+    - face_detector_torchexport
+  region_models:
+    face_detector_torchexport:
+      - face_embedding_torchexport
+
+video_pipeline_face_recognition_v1:
+  full_image_models: []
+  detector_models:
+    - face_detector_torchexport
+  region_models:
+    face_detector_torchexport:
+      - face_embedding_torchexport

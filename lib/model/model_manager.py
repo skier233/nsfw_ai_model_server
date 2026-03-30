@@ -21,6 +21,12 @@ class ModelManager:
         if modelName not in self.models:
             self.models[modelName] = self.create_model(modelName)
         return self.models[modelName]
+
+    def get_or_create_model_alias(self, base_model_name, alias):
+        """Return a model cached under *alias* but created from *base_model_name*'s config."""
+        if alias not in self.models:
+            self.models[alias] = self.create_model(base_model_name)
+        return self.models[alias]
     
     def get_and_refresh_model(self, modelName):
         if modelName not in self.models:

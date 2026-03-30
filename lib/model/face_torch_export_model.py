@@ -141,6 +141,9 @@ class FaceTorchExportModel(AIModel):
             raise ValueError("Embedding face model expects tensor input")
 
         aligned_image = self._try_aligned_face_image(item_future)
+        # Eagerly release the full-resolution source tensor from this
+        # child future now that alignment has been resolved.
+        _clear_region_source(item_future)
         if aligned_image is not None:
             image = aligned_image
         else:
@@ -167,8 +170,7 @@ class FaceTorchExportModel(AIModel):
                 return None
 
             metadata = region_target.get("metadata") or {}
-            detector_payload = metadata.get("detector_payload") or {}
-            kps = detector_payload.get("kps")
+            kps = metadata.get("kps")
             kps = _normalize_kps(kps)
             if kps is None:
                 return None
@@ -182,6 +184,18 @@ class FaceTorchExportModel(AIModel):
         source = item_future[item.input_names[0]]
         if isinstance(source, torch.Tensor):
             return source
+
+
+def _clear_region_source(item_future):
+    """Eagerly release the full-resolution source tensor from a child
+    ItemFuture so the large tensor can be garbage-collected as soon as
+    all sibling regions for the same frame have finished."""
+    data = getattr(item_future, 'data', None)
+    if data is None:
+        return
+    for key in list(data.keys()):
+        if isinstance(key, str) and key.startswith("dynamic_region_source"):
+            data[key] = None
 
         image_path = item_future["image_path"]
         if image_path is not None:
@@ -418,22 +432,30 @@ def nms(dets, thresh):
 
 
 def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thresh=0.4, device="cpu"):
-    # Detect whether input is already in raw [0-255] RGB range (GPU-resident).
-    # If so, skip the expensive CPU-based tensor_to_model_rgb conversion.
+    # Detect whether input is already in raw [0-255] RGB range.
+    # Use a small sample instead of scanning every element — the full
+    # min/max scan is O(N) and prohibitively slow on 4K CPU tensors.
     img_t = img.detach() if isinstance(img, torch.Tensor) else img
     if isinstance(img_t, torch.Tensor) and img_t.dim() >= 3:
-        tmin = float(img_t.min())
-        tmax = float(img_t.max())
+        flat = img_t.reshape(-1)
+        sample = flat[:min(1024, flat.shape[0])]
+        tmin = float(sample.min())
+        tmax = float(sample.max())
         is_raw = tmin >= 0.0 and tmax > 1.1 and tmax <= 256.0
     else:
         is_raw = False
 
     if is_raw:
-        rgb_tensor = img_t.float()
+        rgb_tensor = img_t if img_t.dtype == torch.float32 else img_t.float()
         if rgb_tensor.dim() == 4:
             rgb_tensor = rgb_tensor[0]
     else:
         rgb_tensor = tensor_to_model_rgb(img)
+
+    # Move to GPU before resize so F.interpolate runs on GPU.
+    # The eager-cleanup in region_children_builder / _clear_region_source
+    # ensures the full-res tensor is freed promptly after use.
+    rgb_tensor = rgb_tensor.to(device, non_blocking=True)
 
     im_ratio = float(rgb_tensor.shape[1]) / rgb_tensor.shape[2]
     model_ratio = float(det_size[1]) / det_size[0]

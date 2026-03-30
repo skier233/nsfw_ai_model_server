@@ -1,6 +1,7 @@
 
 import logging
 import time
+import warnings
 import torch
 import torch.nn.functional as F
 from pathlib import Path
@@ -8,6 +9,12 @@ from typing import Iterable, List
 from lib.model.model import Model
 from lib.model.ai_model_python.python_model import PythonModel
 from lib.utils.torch_device_selector import get_device_string
+
+# Suppress the one-time "buffer is not writable" warning emitted by
+# torch.export.load → torch.frombuffer when loading .pt2 archives.
+# The warning is harmless (PyTorch makes the buffer writable internally)
+# and cannot be caught with a context manager because it originates in C++.
+warnings.filterwarnings("ignore", message=".*buffer is not writable.*", category=UserWarning)
 
 
 DEFAULT_MODEL_CAPABILITY = "tagging"
@@ -81,9 +88,11 @@ class AIModel(Model):
             model_file_path = f"./models/{self.model_file_name}.pt2.enc"
             if self.model_license_name.endswith(".0"):
                 model_file_path = f"./models/{self.model_file_name}.pt.enc"
-            self.model = ModelRunner(model_file_path, f"./models/{self.model_license_name}.lic",
-                                     self.max_model_batch_size, self.device,
-                                     self.fill_to_batch, self.keep_on_device)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*buffer is not writable.*", category=UserWarning)
+                self.model = ModelRunner(model_file_path, f"./models/{self.model_license_name}.lic",
+                                         self.max_model_batch_size, self.device,
+                                         self.fill_to_batch, self.keep_on_device)
         else:
             pt2 = Path(f"./models/{self.model_file_name}.pt2")
             pt = Path(f"./models/{self.model_file_name}.pt")
