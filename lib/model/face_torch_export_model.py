@@ -20,7 +20,7 @@ from lib.model.ai_model import AIModel
 from lib.utils.torch_device_selector import get_device_string
 
 
-ARCFACE_DST = np.array(
+FACE_EMBEDDER_DST = np.array(
     [
         [38.2946, 51.6963],
         [73.5318, 51.5014],
@@ -211,45 +211,7 @@ def _ensure_model_rgb_gpu(tensor: torch.Tensor) -> torch.Tensor:
         t = t[0]
     if t.dim() != 3:
         raise ValueError("Expected CHW tensor")
-    t = t.float()
-    tmin = float(t.min())
-    tmax = float(t.max())
-    if tmin >= 0.0 and tmax > 1.1:
-        return t.clamp(0.0, 255.0)
-    if tmin >= -1.1 and tmax <= 1.1:
-        return ((t + 1.0) * 127.5).clamp(0.0, 255.0)
-    if tmin >= -5.0 and tmax <= 5.0:
-        mean = torch.tensor([0.485, 0.456, 0.406], device=t.device, dtype=torch.float32).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=t.device, dtype=torch.float32).view(3, 1, 1)
-        return ((t * std + mean) * 255.0).clamp(0.0, 255.0)
-    if tmin >= 0.0 and tmax <= 1.1:
-        return (t * 255.0).clamp(0.0, 255.0)
-    return t.clamp(0.0, 255.0)
-
-
-def tensor_to_model_rgb(tensor: torch.Tensor):
-    t = tensor.detach().cpu()
-    if t.dim() == 4:
-        t = t[0]
-    if t.dim() != 3:
-        raise ValueError("Expected CHW tensor")
-
-    arr = t.float().numpy()
-    arr = np.transpose(arr, (1, 2, 0))
-    min_val = float(arr.min())
-    max_val = float(arr.max())
-
-    if min_val >= -1.1 and max_val <= 1.1:
-        arr = (arr + 1.0) * 127.5
-    elif min_val >= -5.0 and max_val <= 5.0:
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
-        arr = (arr * std + mean) * 255.0
-    elif min_val >= 0.0 and max_val <= 1.1:
-        arr = arr * 255.0
-
-    arr = np.clip(arr, 0.0, 255.0)
-    return torch.from_numpy(np.transpose(arr, (2, 0, 1))).float()
+    return t.float().clamp(0.0, 255.0)
 
 
 def _resolve_future_key(item_future, prefix):
@@ -279,7 +241,7 @@ def _normalize_kps(kps):
     return arr
 
 
-def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
+def _estimate_face_embedder_affine(landmark: np.ndarray, image_size: int = 112):
     if landmark.shape != (5, 2):
         raise ValueError("Expected landmark shape (5, 2)")
 
@@ -290,7 +252,7 @@ def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
         ratio = float(image_size) / 128.0
         diff_x = 8.0 * ratio
 
-    dst = ARCFACE_DST.copy() * ratio
+    dst = FACE_EMBEDDER_DST.copy() * ratio
     dst[:, 0] += diff_x
 
     src = landmark.astype(np.float32)
@@ -318,8 +280,8 @@ def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
 
 
 def _norm_crop_gpu(source_tensor: torch.Tensor, landmark: np.ndarray, image_size: int = 112):
-    """GPU-based ArcFace alignment using grid_sample (no CPU roundtrip)."""
-    M = _estimate_arcface_affine(landmark, image_size=image_size)
+    """GPU-based Face Embedder alignment using grid_sample (no CPU roundtrip)."""
+    M = _estimate_face_embedder_affine(landmark, image_size=image_size)
 
     t = source_tensor.detach()
     if t.dim() == 4:
@@ -351,13 +313,12 @@ def _norm_crop_tensor(source_tensor: torch.Tensor, landmark: np.ndarray, image_s
     """Legacy CPU-based alignment (kept for fallback compatibility)."""
     from PIL import Image
 
-    M = _estimate_arcface_affine(landmark, image_size=image_size)
+    M = _estimate_face_embedder_affine(landmark, image_size=image_size)
     M3 = np.vstack([M, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
     inv = np.linalg.inv(M3)
     coeffs = inv[:2, :].reshape(-1).tolist()
 
-    rgb = tensor_to_model_rgb(source_tensor)
-    chw = rgb.detach().cpu().numpy().astype(np.float32)
+    chw = source_tensor.detach().cpu().float().numpy()
     hwc = np.transpose(chw, (1, 2, 0))
     hwc_u8 = np.clip(hwc, 0.0, 255.0).astype(np.uint8)
 
@@ -432,25 +393,10 @@ def nms(dets, thresh):
 
 
 def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thresh=0.4, device="cpu"):
-    # Detect whether input is already in raw [0-255] RGB range.
-    # Use a small sample instead of scanning every element — the full
-    # min/max scan is O(N) and prohibitively slow on 4K CPU tensors.
     img_t = img.detach() if isinstance(img, torch.Tensor) else img
-    if isinstance(img_t, torch.Tensor) and img_t.dim() >= 3:
-        flat = img_t.reshape(-1)
-        sample = flat[:min(1024, flat.shape[0])]
-        tmin = float(sample.min())
-        tmax = float(sample.max())
-        is_raw = tmin >= 0.0 and tmax > 1.1 and tmax <= 256.0
-    else:
-        is_raw = False
-
-    if is_raw:
-        rgb_tensor = img_t if img_t.dtype == torch.float32 else img_t.float()
-        if rgb_tensor.dim() == 4:
-            rgb_tensor = rgb_tensor[0]
-    else:
-        rgb_tensor = tensor_to_model_rgb(img)
+    rgb_tensor = img_t if img_t.dtype == torch.float32 else img_t.float()
+    if rgb_tensor.dim() == 4:
+        rgb_tensor = rgb_tensor[0]
 
     # Move to GPU before resize so F.interpolate runs on GPU.
     # The eager-cleanup in region_children_builder / _clear_region_source

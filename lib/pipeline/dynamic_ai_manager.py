@@ -411,7 +411,7 @@ class DynamicAIManager:
             if detector_names and region_model_rules:
                 detector_models = self._select_models_by_name(detector_names)
                 for det_name, det_model in zip(detector_names, detector_models):
-                    det_spec = PreprocessSpec.for_model(det_model.model)
+                    det_spec = PreprocessSpec.for_detector(det_model.model)
                     detector_to_spec[det_name] = det_spec
                     spec_set.add(det_spec)
 

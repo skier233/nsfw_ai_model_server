@@ -85,6 +85,10 @@ class PreprocessSpec:
         if face_role is not None:
             return PreprocessSpec.for_detector(model_inner)
 
+        capabilities = set(getattr(model_inner, "model_capabilities", None) or [])
+        if "detection" in capabilities:
+            return PreprocessSpec.for_detector(model_inner)
+
         return PreprocessSpec.for_tagging_model(model_inner)
 
     @staticmethod

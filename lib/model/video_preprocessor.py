@@ -5,7 +5,6 @@ import torch
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
 from lib.model.preprocessing_python.image_preprocessing import (
-    preprocess_video,
     preprocess_video_deffcode,
     preprocess_video_deffcode_gpu,
     preprocess_video_deffcode_auto,
@@ -41,38 +40,42 @@ class VideoPreprocessorModel(Model):
         # Populated by the dynamic_ai_manager at pipeline construction.
         self.specs: list[PreprocessSpec] = []
 
+        # When using deffcode_auto, GPU decoding is chosen only when the
+        # video's longest edge is >= this threshold.  0 = always GPU.
+        self._gpu_min_long_edge = int(configValues.get("gpu_min_long_edge", 3600))
+
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
-        self._preprocess_backend = "decord"
-        self._preprocess_callable = preprocess_video
-
-        if requested_backend in {"deffcode_gpu", "deffcode", "deffcode_auto"}:
-            backend_choice = requested_backend
-            if backend_choice == "deffcode_gpu" and not torch.cuda.is_available():
+        if requested_backend == "deffcode_gpu":
+            if not torch.cuda.is_available():
                 self.logger.warning(
                     "CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
                 )
-                backend_choice = "deffcode"
-            elif backend_choice == "deffcode_auto" and not torch.cuda.is_available():
-                self.logger.info(
-                    "DeFFcode Auto selected and CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
-                )
-                backend_choice = "deffcode"
-
-            if backend_choice == "deffcode_gpu":
+                self._preprocess_backend = "deffcode"
+                self._preprocess_callable = preprocess_video_deffcode
+            else:
                 self._preprocess_backend = "deffcode_gpu"
                 self._preprocess_callable = preprocess_video_deffcode_gpu
                 self.logger.info("Video preprocessor using DeFFcode GPU backend")
-            elif backend_choice == "deffcode_auto":
-                self._preprocess_backend = "deffcode_auto"
-                self._preprocess_callable = preprocess_video_deffcode_auto
-                self.logger.info("Video preprocessor using DeFFcode Auto backend")
-            else:
+        elif requested_backend == "deffcode":
+            self._preprocess_backend = "deffcode"
+            self._preprocess_callable = preprocess_video_deffcode
+            self.logger.info("Video preprocessor using DeFFcode CPU backend")
+        else:
+            # Default: deffcode_auto — picks GPU or CPU per-video based on resolution.
+            if not torch.cuda.is_available():
+                self.logger.info(
+                    "DeFFcode Auto selected and CUDA is not available; using DeFFcode CPU backend"
+                )
                 self._preprocess_backend = "deffcode"
                 self._preprocess_callable = preprocess_video_deffcode
-                self.logger.info("Video preprocessor using DeFFcode backend")
-        else:
-            self.logger.info("Video preprocessor using Decord backend")
+            else:
+                self._preprocess_backend = "deffcode_auto"
+                self._preprocess_callable = preprocess_video_deffcode_auto
+                self.logger.info(
+                    "Video preprocessor using DeFFcode Auto backend (gpu_min_long_edge=%d)",
+                    self._gpu_min_long_edge,
+                )
 
     async def worker_function(self, data):
         for item in data:
@@ -97,24 +100,21 @@ class VideoPreprocessorModel(Model):
                     _max_decode_long_edge = max(_spec_edges)
 
                 # Decode at native (or capped) resolution — apply_spec handles
-                # per-model resize/normalize/device.
-                # ``device=None`` lets each backend auto-detect: deffcode_gpu
-                # uses NVDEC (requires CUDA), deffcode_auto probes resolution
-                # to decide, and CPU backends default sensibly.
-                # ``include_raw=True`` gives us a [0,255] float32 CHW CPU
-                # tensor per frame — exactly what apply_spec expects.
+                # per-model resize/normalize/device.  With norm_config=-1 the
+                # backends yield (frame_index, tensor) where tensor is a
+                # [0,255] float32 CHW tensor — exactly what apply_spec expects.
                 try:
                     frame_source = preprocess_callable(
                         input_data,
                         frame_interval,
                         0,             # image_size=0: no resize at decode level
                         False,         # use_half_precision=False: fp32 base
-                        None,          # device: let backend pick (NVDEC needs cuda)
+                        None,          # device
                         use_timestamps,
                         vr_video=vr_video,
                         norm_config=-1,            # skip normalization
-                        include_raw=True,          # get raw [0,255] float32 for apply_spec
                         max_decode_long_edge=_max_decode_long_edge,
+                        gpu_min_long_edge=self._gpu_min_long_edge,
                     )
                 except Exception as exc:
                     if preprocess_callable is preprocess_video_deffcode_gpu:
@@ -127,23 +127,24 @@ class VideoPreprocessorModel(Model):
                         frame_source = preprocess_callable(
                             input_data, frame_interval, 0, False, None,
                             use_timestamps, vr_video=vr_video, norm_config=-1,
-                            include_raw=True, max_decode_long_edge=_max_decode_long_edge,
+                            max_decode_long_edge=_max_decode_long_edge,
                         )
-                    elif preprocess_callable is preprocess_video_deffcode:
+                    elif preprocess_callable is preprocess_video_deffcode_auto:
                         self.logger.warning(
-                            "DeFFcode preprocessing failed for '%s'. Falling back to Decord. Error: %s",
+                            "DeFFcode Auto preprocessing failed for '%s'. Falling back to DeFFcode CPU. Error: %s",
                             input_data, exc,
                         )
-                        preprocess_callable = preprocess_video
-                        backend_used = "decord"
+                        preprocess_callable = preprocess_video_deffcode
+                        backend_used = "deffcode"
                         frame_source = preprocess_callable(
                             input_data, frame_interval, 0, False, None,
                             use_timestamps, vr_video=vr_video, norm_config=-1,
-                            include_raw=True, max_decode_long_edge=_max_decode_long_edge,
+                            max_decode_long_edge=_max_decode_long_edge,
                         )
                     else:
                         raise
 
+                spec_start = self.FIXED_OUTPUT_COUNT
                 frame_iterator = iter(frame_source)
                 try:
                     while True:
@@ -156,9 +157,8 @@ class VideoPreprocessorModel(Model):
 
                         frame_count += 1
                         frame_index = frame_data[0]
-                        # frame_data[1] is the transformed tensor (discarded);
-                        # frame_data[2] is the raw [0,255] float32 CHW CPU tensor.
-                        raw_frame = frame_data[2]
+                        raw_frame = frame_data[1]
+                        del frame_data  # release decoder buffer reference
 
                         # Ensure float32 [0,255] for apply_spec.
                         if raw_frame.dtype != torch.float32:
@@ -173,7 +173,6 @@ class VideoPreprocessorModel(Model):
                         }
 
                         # Apply every spec to produce the per-frame tensors.
-                        spec_start = self.FIXED_OUTPUT_COUNT
                         for i, spec in enumerate(self.specs):
                             tensor = apply_spec(raw_frame, spec)
                             payload[item.output_names[spec_start + i]] = tensor

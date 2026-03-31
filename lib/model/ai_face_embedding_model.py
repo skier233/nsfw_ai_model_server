@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from lib.model.ai_model import AIModel
 
 
-ARCFACE_DST = np.array(
+face_embedder_DST = np.array(
     [
         [38.2946, 51.6963],
         [73.5318, 51.5014],
@@ -21,7 +21,7 @@ ARCFACE_DST = np.array(
 
 
 class AIFaceEmbeddingModel(AIModel):
-    """AI model subclass for face embedding (ArcFace via torch.export)."""
+    """AI model subclass for face embedding (Face Embedder via torch.export)."""
 
     def __init__(self, configValues):
         super().__init__(configValues, keep_on_device=False)
@@ -115,20 +115,7 @@ def _ensure_model_rgb_gpu(tensor: torch.Tensor) -> torch.Tensor:
         t = t[0]
     if t.dim() != 3:
         raise ValueError("Expected CHW tensor")
-    t = t.float()
-    tmin = float(t.min())
-    tmax = float(t.max())
-    if tmin >= 0.0 and tmax > 1.1:
-        return t.clamp(0.0, 255.0)
-    if tmin >= -1.1 and tmax <= 1.1:
-        return ((t + 1.0) * 127.5).clamp(0.0, 255.0)
-    if tmin >= -5.0 and tmax <= 5.0:
-        mean = torch.tensor([0.485, 0.456, 0.406], device=t.device, dtype=torch.float32).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=t.device, dtype=torch.float32).view(3, 1, 1)
-        return ((t * std + mean) * 255.0).clamp(0.0, 255.0)
-    if tmin >= 0.0 and tmax <= 1.1:
-        return (t * 255.0).clamp(0.0, 255.0)
-    return t.clamp(0.0, 255.0)
+    return t.float().clamp(0.0, 255.0)
 
 
 def _resolve_future_key(item_future, prefix):
@@ -156,7 +143,7 @@ def _normalize_kps(kps):
     return arr
 
 
-def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
+def _estimate_face_embedder_affine(landmark: np.ndarray, image_size: int = 112):
     if landmark.shape != (5, 2):
         raise ValueError("Expected landmark shape (5, 2)")
 
@@ -167,7 +154,7 @@ def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
         ratio = float(image_size) / 128.0
         diff_x = 8.0 * ratio
 
-    dst = ARCFACE_DST.copy() * ratio
+    dst = face_embedder_DST.copy() * ratio
     dst[:, 0] += diff_x
 
     src = landmark.astype(np.float32)
@@ -195,8 +182,8 @@ def _estimate_arcface_affine(landmark: np.ndarray, image_size: int = 112):
 
 
 def _norm_crop_gpu(source_tensor: torch.Tensor, landmark: np.ndarray, image_size: int = 112):
-    """GPU-based ArcFace alignment using grid_sample (no CPU roundtrip)."""
-    M = _estimate_arcface_affine(landmark, image_size=image_size)
+    """GPU-based Face Embedder alignment using grid_sample (no CPU roundtrip)."""
+    M = _estimate_face_embedder_affine(landmark, image_size=image_size)
 
     t = source_tensor.detach()
     if t.dim() == 4:
