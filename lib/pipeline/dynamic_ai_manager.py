@@ -7,8 +7,10 @@ from lib.config.model_capabilities import ModelCapabilitiesConfig
 from lib.configurator.configure_model_capabilities import load_model_capabilities_config
 from lib.model.ai_model import AIModel
 from lib.pipeline.pipeline import ModelWrapper
+from lib.pipeline.preprocess_spec import PreprocessSpec
 from lib.migrations.migration_v20 import migrate_to_2_0
 from lib.server.exceptions import NoActiveModelsException
+from lib.model.video_preprocessor import VideoPreprocessorModel
 
 
 ai_active_directory = "./config/active_ai.yaml"
@@ -146,245 +148,52 @@ class DynamicAIManager:
 
     def _create_dynamic_video_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
         model_wrappers = []
-        # Each pipeline gets its own preprocessor instance so per-pipeline
-        # settings (skip_base_frame, extra_frame_specs, etc.) don't clash.
+
+        # ── Collect preprocessing specs from all models ──
+        all_specs, model_to_spec, detector_names, detector_models, detector_to_spec, region_source_spec, region_model_rules = (
+            self._collect_pipeline_specs(models, pipeline_name, enable_region_branch)
+        )
+
+        # ── Create per-pipeline preprocessor ──
         if pipeline_name:
             _preproc_alias = f"video_preprocessor_dynamic__{pipeline_name}"
             video_preprocessor = self.model_manager.get_or_create_model_alias("video_preprocessor_dynamic", _preproc_alias)
         else:
             video_preprocessor = self.model_manager.get_or_create_model("video_preprocessor_dynamic")
-        image_size, norm_config = self._resolve_preprocess_settings(models)
-        video_preprocessor.model.image_size = image_size
-        video_preprocessor.model.normalization_config = norm_config
+        video_preprocessor.model.specs = all_specs
 
-        # When the pipeline has no full-image (tagging) models the base
-        # classification frame is never consumed.  Tell the preprocessor
-        # to skip storing it so we don't waste memory on every frame.
-        has_tagging_models = len(models) > 0
-        video_preprocessor.model.skip_base_frame = not has_tagging_models
+        # Build output names: fixed outputs + one per spec.
+        fixed_outputs = ["dynamic_children", "frame_index", "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"]
+        spec_keys = [s.key for s in all_specs]
+        model_wrappers.append(ModelWrapper(video_preprocessor, inputs, fixed_outputs + spec_keys))
 
-        # Pre-scan detectors: if any detector has region branches, add
-        # extra outputs for the original-resolution raw frame (CPU) and a
-        # pre-resized detector-input frame (GPU).  The region source stays
-        # on CPU for face cropping/alignment; the detector frame is small
-        # (~640 long-edge) and stays on GPU for fast inference.
-        _region_frame_key = None
-        _detector_frame_key = None
-        _extra_frame_specs = []
-        preproc_outputs = [
-            "dynamic_children", "dynamic_frame", "frame_index",
-            "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories",
-        ]
-
-        if pipeline_name and enable_region_branch:
-            _prescan_detector_names = self.model_capabilities.resolve_model_names_for_stage(
-                pipeline_name=pipeline_name,
-                stage="detector",
-                available_models=self.models,
-            )
-            if _prescan_detector_names:
-                # 1) Region source: capped to ~1080p on CPU for face cropping/alignment
-                _region_frame_key = "dynamic_frame__region_source"
-                region_out_idx = len(preproc_outputs)
-                preproc_outputs.append(_region_frame_key)
-                try:
-                    _region_max_edge = int(os.environ.get("REGION_SOURCE_MAX_LONG_EDGE", "1920"))
-                except (ValueError, TypeError):
-                    _region_max_edge = 1920
-                _extra_frame_specs.append({
-                    "output_index": region_out_idx,
-                    "image_size": 0,
-                    "norm_config": -1,
-                    "use_half": False,
-                    "max_long_edge": _region_max_edge,
-                    "force_cpu": True,
-                })
-
-                # 2) Detector input: capped to ~640 long-edge on GPU
-                _detector_frame_key = "dynamic_frame__detector_input"
-                det_out_idx = len(preproc_outputs)
-                preproc_outputs.append(_detector_frame_key)
-                try:
-                    _det_max_edge = int(os.environ.get("DETECTOR_MAX_LONG_EDGE", "640"))
-                except (ValueError, TypeError):
-                    _det_max_edge = 640
-                _extra_frame_specs.append({
-                    "output_index": det_out_idx,
-                    "image_size": 0,
-                    "norm_config": -1,
-                    "use_half": False,
-                    "max_long_edge": _det_max_edge,
-                    "force_cpu": False,
-                })
-
-        video_preprocessor.model.extra_frame_specs = _extra_frame_specs
-        model_wrappers.append(ModelWrapper(video_preprocessor, inputs, preproc_outputs))
-
-        # add the ai models
+        # ── Wire tagging models ──
         for model in models:
-            model_wrappers.append(ModelWrapper(model, ["dynamic_frame", "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"], model.model.model_category))
+            spec = model_to_spec[id(model)]
+            model_wrappers.append(ModelWrapper(
+                model,
+                [spec.key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
+                model.model.model_category,
+            ))
 
-        additional_coalesce_inputs = []
-        if pipeline_name and enable_region_branch:
-            detector_names = self.model_capabilities.resolve_model_names_for_stage(
-                pipeline_name=pipeline_name,
-                stage="detector",
-                available_models=self.models,
-            )
-            region_model_rules = self.model_capabilities.get_region_model_rules(pipeline_name)
+        # ── Wire detectors and region branches ──
+        additional_coalesce_inputs = self._build_region_branches(
+            model_wrappers, detector_names, detector_models, detector_to_spec,
+            region_source_spec, region_model_rules, pipeline_name,
+            threshold_key="dynamic_threshold", return_confidence_key="dynamic_return_confidence",
+            skipped_categories_key="dynamic_skipped_categories",
+            region_targets_extra_inputs_fn=lambda det_key, rs_key: ["frame_index", rs_key, "frame_index"] + ([det_key] if det_key != rs_key else []),
+        )
 
-            if detector_names and region_model_rules:
-                detector_models = self._select_models_by_name(detector_names)
-                region_rules_by_detector = {
-                    str(rule.get("key", "")).strip(): rule
-                    for rule in region_model_rules
-                }
-
-                for detector_name, detector_model in zip(detector_names, detector_models):
-                    detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
-                    additional_coalesce_inputs.extend(detector_outputs)
-
-                    # Detectors receive the pre-resized GPU frame for
-                    # fast inference.  run_detection() handles the final
-                    # 640×640 pad internally (near-no-op when input is
-                    # already ~640 long-edge).
-                    det_input_key = _detector_frame_key or _region_frame_key or "dynamic_frame"
-                    region_source_key = _region_frame_key or det_input_key
-
-                    model_wrappers.append(
-                        ModelWrapper(
-                            detector_model,
-                            [det_input_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
-                            detector_outputs,
-                        )
-                    )
-
-                    detector_rule = region_rules_by_detector.get(detector_name, None)
-                    if detector_rule is None:
-                        continue
-
-                    region_model_names = list(detector_rule.get("models", []) or [])
-                    if not region_model_names:
-                        label_model_map = detector_rule.get("label_models", {}) or {}
-                        for label_models in label_model_map.values():
-                            region_model_names.extend(_normalize_string_list(label_models) or [])
-                        region_model_names = _dedupe_strings(region_model_names)
-                        if region_model_names:
-                            self.logger.warning(
-                                f"Pipeline '{pipeline_name}' defines label-specific region_models for detector '{detector_name}', "
-                                f"but label-specific routing is not available yet. Running union of all configured label model lists."
-                            )
-
-                    if not region_model_names:
-                        continue
-
-                    if len(detector_outputs) == 0:
-                        self.logger.warning(
-                            f"Skipping region branch for detector '{detector_name}' in pipeline '{pipeline_name}' because it emits no output categories"
-                        )
-                        continue
-
-                    detector_output_key = detector_outputs[0]
-                    if len(detector_outputs) > 1:
-                        self.logger.warning(
-                            f"Detector '{detector_name}' in pipeline '{pipeline_name}' emits multiple output keys {detector_outputs}. "
-                            f"Using '{detector_output_key}' for region target extraction."
-                        )
-
-                    alias = _sanitize_key(detector_name)
-                    region_targets_key = f"region_targets__{alias}"
-                    region_errors_key = f"region_errors__{alias}"
-                    children_key = f"dynamic_region_children__{alias}"
-                    region_image_key = f"dynamic_region_image__{alias}"
-                    region_target_key = f"dynamic_region_target__{alias}"
-                    threshold_key = f"dynamic_threshold__{alias}"
-                    return_confidence_key = f"dynamic_return_confidence__{alias}"
-                    skipped_categories_key = f"dynamic_skipped_categories__{alias}"
-                    region_result_key = f"dynamic_region_result__{alias}"
-                    region_results_key = f"regions__{alias}"
-                    detection_index_key = f"detection_index__{alias}"
-                    region_coalesce_index_key = "detection_index"
-
-                    model_wrappers.append(
-                        ModelWrapper(
-                            self.model_manager.get_or_create_model("detector_result_to_region_targets"),
-                            [detector_output_key, "frame_index", region_source_key, "frame_index"]
-                            + ([det_input_key] if det_input_key != region_source_key else []),
-                            [region_targets_key, region_errors_key],
-                        )
-                    )
-
-                    # Region source is the full-resolution CPU frame.
-                    model_wrappers.append(
-                        ModelWrapper(
-                            self.model_manager.get_or_create_model("region_children_builder"),
-                            [region_source_key, region_targets_key, "dynamic_threshold", "dynamic_return_confidence", "dynamic_skipped_categories"],
-                            [
-                                children_key,
-                                region_image_key,
-                                region_target_key,
-                                threshold_key,
-                                return_confidence_key,
-                                skipped_categories_key,
-                                f"dynamic_region_source__{alias}",
-                                region_coalesce_index_key,
-                            ],
-                        )
-                    )
-
-                    region_models = self._select_models_by_name(region_model_names)
-                    region_branch_outputs = []
-                    for region_model in region_models:
-                        branch_outputs = _normalize_string_list(region_model.model.model_category) or []
-                        region_branch_outputs.extend(branch_outputs)
-                        model_wrappers.append(
-                            ModelWrapper(
-                                region_model,
-                                [region_image_key, threshold_key, return_confidence_key, skipped_categories_key],
-                                branch_outputs,
-                            )
-                        )
-
-                    model_wrappers.append(
-                        ModelWrapper(
-                            self.model_manager.get_or_create_model("result_coalescer"),
-                            [region_coalesce_index_key] + region_branch_outputs,
-                            [region_result_key],
-                        )
-                    )
-
-                    model_wrappers.append(
-                        ModelWrapper(
-                            self.model_manager.get_or_create_model("result_finisher"),
-                            [region_result_key],
-                            [],
-                        )
-                    )
-
-                    model_wrappers.append(
-                        ModelWrapper(
-                            self.model_manager.get_or_create_model("batch_awaiter"),
-                            [children_key],
-                            [region_results_key],
-                        )
-                    )
-
-                    # Only include the formatted region results in parent coalescer;
-                    # region_targets and region_errors are internal plumbing.
-                    additional_coalesce_inputs.append(region_results_key)
-
-        # coalesce all the ai results
+        # ── Coalesce ──
         coalesce_inputs = self._build_coalesce_inputs(models)
         coalesce_inputs.extend(additional_coalesce_inputs)
         coalesce_inputs = _dedupe_strings(coalesce_inputs)
         coalesce_inputs.insert(0, "frame_index")
         model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_coalescer"), coalesce_inputs, ["dynamic_result"]))
-
-        # finish results
         model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("result_finisher"), ["dynamic_result"], []))
-
-        # await children
         model_wrappers.append(ModelWrapper(self.model_manager.get_or_create_model("batch_awaiter"), ["dynamic_children"], outputs))
+
         self.logger.debug("Finished creating dynamic Video AI models")
         return model_wrappers
     
@@ -393,207 +202,42 @@ class DynamicAIManager:
 
     def _create_dynamic_image_wrappers(self, inputs, outputs, models, pipeline_name=None, enable_region_branch=False):
         model_wrappers = []
-        # Each pipeline gets its own preprocessor instance so per-pipeline
-        # settings (skip_base_output, region_source_max_long_edge, etc.)
-        # don't clash.
+
+        # ── Collect preprocessing specs from all models ──
+        all_specs, model_to_spec, detector_names, detector_models, detector_to_spec, region_source_spec, region_model_rules = (
+            self._collect_pipeline_specs(models, pipeline_name, enable_region_branch)
+        )
+
+        # ── Create per-pipeline preprocessor ──
         if pipeline_name:
             _preproc_alias = f"image_preprocessor_dynamic__{pipeline_name}"
             image_preprocessor = self.model_manager.get_or_create_model_alias("image_preprocessor_dynamic", _preproc_alias)
         else:
             image_preprocessor = self.model_manager.get_or_create_model("image_preprocessor_dynamic")
-        image_size, norm_config = self._resolve_preprocess_settings(models)
-        image_preprocessor.model.image_size = image_size
-        image_preprocessor.model.normalization_config = norm_config
+        image_preprocessor.model.specs = all_specs
 
-        # When the pipeline has no full-image (tagging) models the
-        # classification tensor is never consumed.  Tell the preprocessor
-        # to skip emitting it so we don't waste memory.
-        has_tagging_models = len(models) > 0
-        image_preprocessor.model.skip_base_output = not has_tagging_models
+        spec_keys = [s.key for s in all_specs]
+        model_wrappers.append(ModelWrapper(image_preprocessor, [inputs[0]], spec_keys))
 
-        # ── Peek ahead: do we need a region-source (raw) tensor? ──
-        # If detectors + region models are configured we produce the raw
-        # original-resolution [0-255] tensor from the SAME preprocessor
-        # that builds the classification tensor – one disk read instead of
-        # two.  The preprocessor's dual-output mode emits the raw tensor
-        # as its second output_name.
-        _region_source_key = None
-        _needs_region_source = False
-        if pipeline_name and enable_region_branch:
-            _det_names = self.model_capabilities.resolve_model_names_for_stage(
-                pipeline_name=pipeline_name,
-                stage="detector",
-                available_models=self.models,
-            )
-            _region_rules = self.model_capabilities.get_region_model_rules(pipeline_name)
-            _needs_region_source = bool(_det_names) and bool(_region_rules)
-
-        if _needs_region_source:
-            _region_source_key = "dynamic_image__region_source"
-            # Cap region-source to ~1080p to avoid holding 4K+ tensors.
-            try:
-                _region_max_edge = int(os.environ.get("REGION_SOURCE_MAX_LONG_EDGE", "1920"))
-            except (ValueError, TypeError):
-                _region_max_edge = 1920
-            image_preprocessor.model.region_source_max_long_edge = _region_max_edge
-            model_wrappers.append(
-                ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image", _region_source_key])
-            )
-        else:
-            model_wrappers.append(ModelWrapper(image_preprocessor, [inputs[0]], ["dynamic_image"]))
-
-        # add the ai models
+        # ── Wire tagging models ──
         for model in models:
-            model_wrappers.append(ModelWrapper(model, ["dynamic_image", inputs[1], inputs[2], inputs[3]], model.model.model_category))
+            spec = model_to_spec[id(model)]
+            model_wrappers.append(ModelWrapper(
+                model,
+                [spec.key, inputs[1], inputs[2], inputs[3]],
+                model.model.model_category,
+            ))
 
-        additional_coalesce_inputs = []
-        if _needs_region_source:
-            detector_names = _det_names
-            region_model_rules = _region_rules
-            detector_models = self._select_models_by_name(detector_names)
-            region_rules_by_detector = {
-                str(rule.get("key", "")).strip(): rule
-                for rule in region_model_rules
-            }
+        # ── Wire detectors and region branches ──
+        additional_coalesce_inputs = self._build_region_branches(
+            model_wrappers, detector_names, detector_models, detector_to_spec,
+            region_source_spec, region_model_rules, pipeline_name,
+            threshold_key=inputs[1], return_confidence_key=inputs[2],
+            skipped_categories_key=inputs[3],
+            region_targets_extra_inputs_fn=lambda det_key, rs_key: [inputs[0], rs_key],
+        )
 
-            for detector_name, detector_model in zip(detector_names, detector_models):
-                detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
-                additional_coalesce_inputs.extend(detector_outputs)
-
-                # Every detector receives the original-resolution raw
-                # image.  run_detection() inside each model handles its
-                # own resize to the model's det_size (e.g. 640×640) with
-                # correct aspect-ratio preservation and produces bboxes/
-                # kps in original-image coordinates.
-                model_wrappers.append(
-                    ModelWrapper(
-                        detector_model,
-                        [_region_source_key, inputs[1], inputs[2], inputs[3]],
-                        detector_outputs,
-                    )
-                )
-
-                detector_rule = region_rules_by_detector.get(detector_name, None)
-                if detector_rule is None:
-                    continue
-
-                region_model_names = list(detector_rule.get("models", []) or [])
-                if not region_model_names:
-                    label_model_map = detector_rule.get("label_models", {}) or {}
-                    for label_models in label_model_map.values():
-                        region_model_names.extend(_normalize_string_list(label_models) or [])
-                    region_model_names = _dedupe_strings(region_model_names)
-                    if region_model_names:
-                        self.logger.warning(
-                            f"Pipeline '{pipeline_name}' defines label-specific region_models for detector '{detector_name}', "
-                            f"but label-specific routing is not available yet. Running union of all configured label model lists."
-                        )
-
-                if not region_model_names:
-                    continue
-
-                if len(detector_outputs) == 0:
-                    self.logger.warning(
-                        f"Skipping region branch for detector '{detector_name}' in pipeline '{pipeline_name}' because it emits no output categories"
-                    )
-                    continue
-
-                detector_output_key = detector_outputs[0]
-                if len(detector_outputs) > 1:
-                    self.logger.warning(
-                        f"Detector '{detector_name}' in pipeline '{pipeline_name}' emits multiple output keys {detector_outputs}. "
-                        f"Using '{detector_output_key}' for region target extraction."
-                    )
-
-                alias = _sanitize_key(detector_name)
-                region_targets_key = f"region_targets__{alias}"
-                region_errors_key = f"region_errors__{alias}"
-                children_key = f"dynamic_region_children__{alias}"
-                region_image_key = f"dynamic_region_image__{alias}"
-                region_target_key = f"dynamic_region_target__{alias}"
-                threshold_key = f"dynamic_threshold__{alias}"
-                return_confidence_key = f"dynamic_return_confidence__{alias}"
-                skipped_categories_key = f"dynamic_skipped_categories__{alias}"
-                region_result_key = f"dynamic_region_result__{alias}"
-                region_results_key = f"regions__{alias}"
-                detection_index_key = f"detection_index__{alias}"
-                # The region coalescer operates per-child (one region, one
-                # detector) so it uses clean names without the alias suffix.
-                # These become the dict keys in the API response.
-                region_coalesce_index_key = "detection_index"
-
-                # Region source is the original-resolution image.
-                # Detection coords (bboxes, kps) are already in original
-                # space (run_detection scales them back), so cropping and
-                # ArcFace alignment operate at full resolution.
-
-                model_wrappers.append(
-                    ModelWrapper(
-                        self.model_manager.get_or_create_model("detector_result_to_region_targets"),
-                        [detector_output_key, inputs[0], _region_source_key],
-                        [region_targets_key, region_errors_key],
-                    )
-                )
-
-                model_wrappers.append(
-                    ModelWrapper(
-                        self.model_manager.get_or_create_model("region_children_builder"),
-                        [_region_source_key, region_targets_key, inputs[1], inputs[2], inputs[3]],
-                        [
-                            children_key,
-                            region_image_key,
-                            region_target_key,
-                            threshold_key,
-                            return_confidence_key,
-                            skipped_categories_key,
-                            f"dynamic_region_source__{alias}",
-                            region_coalesce_index_key,
-                        ],
-                    )
-                )
-
-                region_models = self._select_models_by_name(region_model_names)
-                region_branch_outputs = []
-                for region_model in region_models:
-                    branch_outputs = _normalize_string_list(region_model.model.model_category) or []
-                    region_branch_outputs.extend(branch_outputs)
-                    model_wrappers.append(
-                        ModelWrapper(
-                            region_model,
-                            [region_image_key, threshold_key, return_confidence_key, skipped_categories_key],
-                            branch_outputs,
-                        )
-                    )
-
-                model_wrappers.append(
-                    ModelWrapper(
-                        self.model_manager.get_or_create_model("result_coalescer"),
-                        [region_coalesce_index_key] + region_branch_outputs,
-                        [region_result_key],
-                    )
-                )
-
-                model_wrappers.append(
-                    ModelWrapper(
-                        self.model_manager.get_or_create_model("result_finisher"),
-                        [region_result_key],
-                        [],
-                    )
-                )
-
-                model_wrappers.append(
-                    ModelWrapper(
-                        self.model_manager.get_or_create_model("batch_awaiter"),
-                        [children_key],
-                        [region_results_key],
-                    )
-                )
-
-                # Only include the formatted region results in parent coalescer;
-                # region_targets and region_errors are internal plumbing.
-                additional_coalesce_inputs.append(region_results_key)
-
-        # coalesce all the ai results
+        # ── Coalesce ──
         coalesce_inputs = self._build_coalesce_inputs(models)
         coalesce_inputs.extend(additional_coalesce_inputs)
         coalesce_inputs = _dedupe_strings(coalesce_inputs)
@@ -735,16 +379,168 @@ class DynamicAIManager:
                 coalesce_inputs.append(categories)
         return coalesce_inputs
 
-    def _resolve_preprocess_settings(self, models):
-        fallback_size = self.image_size or 512
-        fallback_norm = self.normalization_config or 1
-        if not models:
-            return fallback_size, fallback_norm
+    # ── Spec collection and region branch helpers ──────────────────────
 
-        first_model = models[0].model
-        image_size = getattr(first_model, "model_image_size", None) or fallback_size
-        norm_config = getattr(first_model, "normalization_config", None) or fallback_norm
-        return image_size, norm_config
+    def _collect_pipeline_specs(self, tagging_models, pipeline_name, enable_region_branch):
+        """Collect and deduplicate PreprocessSpecs for every model in a pipeline.
+
+        Returns:
+            (all_specs, model_to_spec, detector_names, detector_models,
+             detector_to_spec, region_source_spec, region_model_rules)
+        """
+        spec_set = set()
+        model_to_spec = {}  # id(model_wrapper) → PreprocessSpec
+
+        for model in tagging_models:
+            spec = PreprocessSpec.for_model(model.model)
+            model_to_spec[id(model)] = spec
+            spec_set.add(spec)
+
+        detector_names = []
+        detector_models = []
+        detector_to_spec = {}  # detector_name → PreprocessSpec
+        region_source_spec = None
+        region_model_rules = []
+
+        if pipeline_name and enable_region_branch:
+            detector_names = self.model_capabilities.resolve_model_names_for_stage(
+                pipeline_name=pipeline_name, stage="detector", available_models=self.models,
+            ) or []
+            region_model_rules = self.model_capabilities.get_region_model_rules(pipeline_name) or []
+
+            if detector_names and region_model_rules:
+                detector_models = self._select_models_by_name(detector_names)
+                for det_name, det_model in zip(detector_names, detector_models):
+                    det_spec = PreprocessSpec.for_model(det_model.model)
+                    detector_to_spec[det_name] = det_spec
+                    spec_set.add(det_spec)
+
+                region_source_spec = PreprocessSpec.for_region_source()
+                spec_set.add(region_source_spec)
+
+        # Sort: highest effective resolution first.  This means the
+        # preprocessor publishes large tensors (region source) before
+        # small ones, letting the detector chain start early.
+        all_specs = sorted(spec_set, key=lambda s: s.effective_resolution, reverse=True)
+
+        return (all_specs, model_to_spec, detector_names, detector_models,
+                detector_to_spec, region_source_spec, region_model_rules)
+
+    def _build_region_branches(self, model_wrappers, detector_names, detector_models,
+                               detector_to_spec, region_source_spec, region_model_rules,
+                               pipeline_name, *, threshold_key, return_confidence_key,
+                               skipped_categories_key, region_targets_extra_inputs_fn):
+        """Wire detector → region_targets → region_children → region_models → coalesce.
+
+        Appends ModelWrappers to *model_wrappers* in-place and returns the
+        list of additional coalesce input keys.
+
+        ``region_targets_extra_inputs_fn(det_input_key, region_source_key)``
+        returns the extra inputs for ``detector_result_to_region_targets``
+        (differs between image and video paths).
+        """
+        additional_coalesce_inputs = []
+        if not detector_names or not region_model_rules or region_source_spec is None:
+            return additional_coalesce_inputs
+
+        region_source_key = region_source_spec.key
+        region_rules_by_detector = {
+            str(rule.get("key", "")).strip(): rule
+            for rule in region_model_rules
+        }
+
+        for detector_name, detector_model in zip(detector_names, detector_models):
+            det_spec = detector_to_spec[detector_name]
+            det_input_key = det_spec.key
+            detector_outputs = _normalize_string_list(detector_model.model.model_category) or []
+            additional_coalesce_inputs.extend(detector_outputs)
+
+            model_wrappers.append(ModelWrapper(
+                detector_model,
+                [det_input_key, threshold_key, return_confidence_key, skipped_categories_key],
+                detector_outputs,
+            ))
+
+            detector_rule = region_rules_by_detector.get(detector_name)
+            if detector_rule is None:
+                continue
+
+            region_model_names = list(detector_rule.get("models", []) or [])
+            if not region_model_names:
+                label_model_map = detector_rule.get("label_models", {}) or {}
+                for label_models in label_model_map.values():
+                    region_model_names.extend(_normalize_string_list(label_models) or [])
+                region_model_names = _dedupe_strings(region_model_names)
+                if region_model_names:
+                    self.logger.warning(
+                        f"Pipeline '{pipeline_name}' defines label-specific region_models for detector '{detector_name}', "
+                        f"but label-specific routing is not available yet. Running union of all configured label model lists."
+                    )
+
+            if not region_model_names:
+                continue
+            if not detector_outputs:
+                self.logger.warning(
+                    f"Skipping region branch for detector '{detector_name}' in pipeline '{pipeline_name}' because it emits no output categories"
+                )
+                continue
+
+            detector_output_key = detector_outputs[0]
+            if len(detector_outputs) > 1:
+                self.logger.warning(
+                    f"Detector '{detector_name}' in pipeline '{pipeline_name}' emits multiple output keys {detector_outputs}. "
+                    f"Using '{detector_output_key}' for region target extraction."
+                )
+
+            alias = _sanitize_key(detector_name)
+            rt_key = f"region_targets__{alias}"
+            re_key = f"region_errors__{alias}"
+            ch_key = f"dynamic_region_children__{alias}"
+            ri_key = f"dynamic_region_image__{alias}"
+            rtg_key = f"dynamic_region_target__{alias}"
+            th_key = f"dynamic_threshold__{alias}"
+            rc_key = f"dynamic_return_confidence__{alias}"
+            sc_key = f"dynamic_skipped_categories__{alias}"
+            rr_key = f"dynamic_region_result__{alias}"
+            rrs_key = f"regions__{alias}"
+            ci_key = "detection_index"  # clean name for coalescer
+
+            extra_inputs = region_targets_extra_inputs_fn(det_input_key, region_source_key)
+            model_wrappers.append(ModelWrapper(
+                self.model_manager.get_or_create_model("detector_result_to_region_targets"),
+                [detector_output_key] + extra_inputs,
+                [rt_key, re_key],
+            ))
+
+            model_wrappers.append(ModelWrapper(
+                self.model_manager.get_or_create_model("region_children_builder"),
+                [region_source_key, rt_key, threshold_key, return_confidence_key, skipped_categories_key],
+                [ch_key, ri_key, rtg_key, th_key, rc_key, sc_key, f"dynamic_region_source__{alias}", ci_key],
+            ))
+
+            region_models = self._select_models_by_name(region_model_names)
+            region_branch_outputs = []
+            for region_model in region_models:
+                branch_outputs = _normalize_string_list(region_model.model.model_category) or []
+                region_branch_outputs.extend(branch_outputs)
+                model_wrappers.append(ModelWrapper(
+                    region_model, [ri_key, th_key, rc_key, sc_key], branch_outputs,
+                ))
+
+            model_wrappers.append(ModelWrapper(
+                self.model_manager.get_or_create_model("result_coalescer"),
+                [ci_key] + region_branch_outputs, [rr_key],
+            ))
+            model_wrappers.append(ModelWrapper(
+                self.model_manager.get_or_create_model("result_finisher"), [rr_key], [],
+            ))
+            model_wrappers.append(ModelWrapper(
+                self.model_manager.get_or_create_model("batch_awaiter"), [ch_key], [rrs_key],
+            ))
+
+            additional_coalesce_inputs.append(rrs_key)
+
+        return additional_coalesce_inputs
     
     def __verify_models(self, models, second_pass=False):
         first_image_size = None
@@ -892,28 +688,4 @@ def _sanitize_key(value: str) -> str:
     if not text:
         return "unknown"
     return re.sub(r"[^0-9a-zA-Z_]+", "_", text)
-
-
-def _get_detector_preprocess_spec(detector_model):
-    """Return the ``(image_size, normalization_config, use_half_precision)``
-    that *detector_model* requires, or ``None`` when it is happy with the
-    default pipeline preprocessor output.
-
-    The tuple is used to configure a dedicated preprocessor so the detector
-    receives a tensor at exactly its declared resolution and pixel format
-    without storing a full-resolution copy.
-    """
-    inner = getattr(detector_model, "model", None)
-    if inner is None:
-        return None
-    face_role = getattr(inner, "face_model_role", None)
-    model_type = str(getattr(inner, "model_type", "") or "").lower().replace("_", "").replace(" ", "")
-    if face_role is not None or "facetorchexport" in model_type:
-        return (
-            getattr(inner, "model_image_size", 640) or 640,
-            -1,     # raw [0-255] pixels, no normalization
-            False,  # float32 — face models need full precision
-        )
-    return None
-
 

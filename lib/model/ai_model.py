@@ -115,68 +115,6 @@ class AIModel(Model):
     async def worker_function(self, data):
         raise NotImplementedError("Subclasses must implement worker_function")
 
-
-def _resize_tensor_to_model_size(image_tensor: torch.Tensor, model_image_size) -> torch.Tensor:
-    if not isinstance(image_tensor, torch.Tensor):
-        return image_tensor
-
-    if model_image_size is None:
-        return image_tensor
-
-    target_size = int(model_image_size)
-    if target_size <= 0:
-        return image_tensor
-
-    if image_tensor.dim() != 3:
-        return image_tensor
-
-    current_h = int(image_tensor.shape[-2])
-    current_w = int(image_tensor.shape[-1])
-    if current_h == target_size and current_w == target_size:
-        return image_tensor
-
-    resized = F.interpolate(
-        image_tensor.unsqueeze(0),
-        size=(target_size, target_size),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0)
-    return resized.to(dtype=image_tensor.dtype)
-
-
-def _get_model_input_tensor(item_future, input_name: str, model_image_size):
-    image_tensor = item_future[input_name]
-    if not isinstance(image_tensor, torch.Tensor):
-        return image_tensor
-
-    target_size = _normalize_target_size(model_image_size)
-    if target_size is None or image_tensor.dim() != 3:
-        return image_tensor
-
-    current_h = int(image_tensor.shape[-2])
-    current_w = int(image_tensor.shape[-1])
-    if current_h == target_size and current_w == target_size:
-        return image_tensor
-
-    cache = item_future.data.setdefault("_resized_tensor_cache", {})
-    cache_key = (input_name, target_size, current_h, current_w, str(image_tensor.dtype))
-    cached_tensor = cache.get(cache_key, None)
-    if isinstance(cached_tensor, torch.Tensor):
-        return cached_tensor
-
-    resized_tensor = _resize_tensor_to_model_size(image_tensor, target_size)
-    cache[cache_key] = resized_tensor
-    return resized_tensor
-
-
-def _normalize_target_size(model_image_size):
-    if model_image_size is None:
-        return None
-    target_size = int(model_image_size)
-    if target_size <= 0:
-        return None
-    return target_size
-
 def _normalize_string_list(raw_value) -> List[str] | None:
     if raw_value is None:
         return None

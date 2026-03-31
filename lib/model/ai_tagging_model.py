@@ -1,7 +1,7 @@
 
 import time
 import torch
-from lib.model.ai_model import AIModel, _get_model_input_tensor
+from lib.model.ai_model import AIModel
 
 
 class AITaggingModel(AIModel):
@@ -27,7 +27,7 @@ class AITaggingModel(AIModel):
             resized_images = []
             for item in data:
                 itemFuture = item.item_future
-                image_tensor = _get_model_input_tensor(itemFuture, item.input_names[0], self.model_image_size)
+                image_tensor = itemFuture[item.input_names[0]]
                 resized_images.append(image_tensor)
 
             images = torch.stack(resized_images, dim=0).to(self.localdevice)
