@@ -1,26 +1,50 @@
 import logging
 import time
-from lib.async_lib.async_processing import ItemFuture
 from lib.model.model import Model
-from lib.model.preprocessing_python.image_preprocessing import preprocess_image
+from lib.model.preprocessing_python.image_preprocessing import _load_image_tensor
+from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec
+
 
 class ImagePreprocessorModel(Model):
+    """Spec-driven image preprocessor.
+
+    The ``specs`` list (set at pipeline construction time by the dynamic AI
+    manager) declares every preprocessed tensor this pipeline needs.
+    A single disk read produces all of them — one per spec — enabling
+    models at different resolutions/formats to share the same I/O.
+    """
+
     def __init__(self, configValues):
         super().__init__(configValues)
-        self.image_size = configValues.get("image_size", 512)
-        self.use_half_precision = configValues.get("use_half_precision", True)
-        self.device = configValues.get("device", None)
-        self.normalization_config = configValues.get("normalization_config", 1)
         self.logger = logging.getLogger("logger")
-    
+
+        # Populated by the dynamic_ai_manager at pipeline construction.
+        # Each entry is a PreprocessSpec; output_names[i] corresponds to
+        # specs[i].
+        self.specs: list[PreprocessSpec] = []
+
     async def worker_function(self, data):
         for item in data:
             try:
                 itemFuture = item.item_future
                 input_data = itemFuture[item.input_names[0]]
-                norm_config = self.normalization_config or 1
                 start_time = time.perf_counter()
-                preprocessed_frame = preprocess_image(input_data, self.image_size, self.use_half_precision, self.device, norm_config=norm_config)
+
+                # One disk read → CPU uint8 CHW tensor.
+                raw_uint8 = _load_image_tensor(input_data)
+                # Float conversion once — all specs scale from this.
+                raw_float = raw_uint8.float()  # [0, 255] fp32 CPU
+                del raw_uint8
+
+                # Produce a tensor for each spec.
+                # Specs are pre-sorted (highest effective resolution first)
+                # by the dynamic_ai_manager, so output ordering is stable.
+                for spec, output_key in zip(self.specs, item.output_names):
+                    tensor = apply_spec(raw_float, spec)
+                    await itemFuture.set_data(output_key, tensor)
+
+                del raw_float
+
                 elapsed = time.perf_counter() - start_time
                 root_future = getattr(itemFuture, "root_future", itemFuture)
                 metrics = getattr(root_future, "_pipeline_metrics", None)
@@ -30,7 +54,6 @@ class ImagePreprocessorModel(Model):
                 metrics["preprocess_seconds"] = metrics.get("preprocess_seconds", 0.0) + elapsed
                 metrics["images_preprocessed"] = metrics.get("images_preprocessed", 0) + 1
                 metrics["preprocess_backend"] = "image_preprocessor"
-                await itemFuture.set_data(item.output_names[0], preprocessed_frame)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error} for file: {input_data}")
                 itemFuture.set_exception(fnf_error)

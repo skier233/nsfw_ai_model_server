@@ -15,6 +15,7 @@ class PipelineManager:
         self.dynamic_ai_manager = DynamicAIManager(self.model_manager)
     
     async def load_pipelines(self, pipeline_strings):
+        self.dynamic_ai_manager.set_known_pipelines(pipeline_strings)
         for pipeline in pipeline_strings:
             self.logger.info(f"Loading pipeline: {pipeline}")
             if not isinstance(pipeline, str):
@@ -22,19 +23,31 @@ class PipelineManager:
             pipeline_config_path = f"./config/pipelines/{pipeline}.yaml"
             try:
                 loaded_config = load_config(pipeline_config_path)
-                newpipeline = Pipeline(loaded_config, self.model_manager, self.dynamic_ai_manager)
+                newpipeline = Pipeline(loaded_config, self.model_manager, self.dynamic_ai_manager, pipeline_name=pipeline)
                 self.pipelines[pipeline] = newpipeline
                 await newpipeline.start_model_processing()
                 self.logger.info(f"Pipeline {pipeline} V{newpipeline.version} loaded successfully!")
             except NoActiveModelsException as e:
                 raise e
             except Exception as e:
-                del self.pipelines[pipeline]
-                self.logger.error(f"Error loading pipeline {pipeline}: {e}")
-                self.logger.debug("Exception details:", exc_info=True)
+                self.pipelines.pop(pipeline, None)
+                error_msg = str(e)
+                if "No active AI models matched dynamic expansion filters" in error_msg:
+                    self.logger.warning(
+                        f"Pipeline '{pipeline}' skipped: no active models are available for one or more "
+                        f"dynamic stages (models may not be downloaded or not listed in active_ai_models). "
+                        f"Detail: {error_msg}"
+                    )
+                else:
+                    self.logger.error(f"Error loading pipeline {pipeline}: {e}")
+                    self.logger.debug("Exception details:", exc_info=True)
             
         if not self.pipelines:
             raise ServerStopException("Error: No valid pipelines loaded!")
+
+    def has_pipeline(self, pipeline_name) -> bool:
+        return pipeline_name in self.pipelines
+
     def get_pipeline(self, pipeline_name) -> Pipeline:
         if not pipeline_name in self.pipelines:
             self.logger.error(f"Error: Pipeline: {pipeline_name} not found in valid loaded pipelines!")

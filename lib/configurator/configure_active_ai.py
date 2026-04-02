@@ -12,8 +12,16 @@ def load_active_ai_models():
     return data.get('active_ai_models', []) or []
 
 def save_active_ai_models(active_ai_models):
+    existing = {}
+    if os.path.exists(active_ai_yaml_path):
+        with open(active_ai_yaml_path, 'r') as f:
+            existing = yaml.safe_load(f) or {}
+    existing['active_ai_models'] = active_ai_models
     with open(active_ai_yaml_path, 'w') as f:
-        yaml.dump({'active_ai_models': active_ai_models}, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+
+# Model types that represent user-selectable AI models in the active AI selector.
+_AI_MODEL_TYPES = {"model", "face_torch_export"}
 
 def load_available_ai_models():
     models = []
@@ -22,7 +30,7 @@ def load_available_ai_models():
             yaml_path = os.path.join(ai_models_directory, file)
             with open(yaml_path, 'r') as f:
                 data = yaml.safe_load(f)
-            if data.get('type') == 'model' and data.get('model_category', None) is not None:
+            if data.get('type') in _AI_MODEL_TYPES and data.get('model_category', None) is not None:
                 data['yaml_file_name'] = file.replace(".yaml", "")  # Use the file name itself
                 models.append(data)
     return models
@@ -66,8 +74,7 @@ def open_ui(stdscr):
     available_ai_models.sort(key=lambda x: (x['model_category'][0], int(x['model_identifier'])))
     active_ai_models.sort(key=lambda x: (x['model_category'][0], int(x['model_identifier'])))
 
-    # Determine the image size and categories of active models
-    active_image_sizes = {model['model_image_size'] for model in active_ai_models}
+    # Determine the categories of active models
     active_categories = {category for model in active_ai_models for category in model['model_category']}
 
     current_list = 'available'
@@ -81,8 +88,8 @@ def open_ui(stdscr):
         y_offset = 3
         for idx, model in enumerate(available_ai_models):
             highlight = current_list == 'available' and idx == current_index
-            incompatible = any(size != model['model_image_size'] for size in active_image_sizes) or any(category in active_categories for category in model['model_category'])
-            reason = "Different image size" if any(size != model['model_image_size'] for size in active_image_sizes) else "Category already active" if any(category in active_categories for category in model['model_category']) else ""
+            incompatible = any(category in active_categories for category in model['model_category'])
+            reason = "Category already active" if incompatible else ""
             display_model(stdscr, y_offset, 0, model, highlight, incompatible, reason)
             y_offset += 1
 
@@ -111,11 +118,10 @@ def open_ui(stdscr):
         elif key == curses.KEY_RIGHT or key in [curses.KEY_ENTER, 10, 13]:
             if current_list == 'available' and available_ai_models:
                 model = available_ai_models[current_index]
-                incompatible = any(size != model['model_image_size'] for size in active_image_sizes) or any(category in active_categories for category in model['model_category'])
+                incompatible = any(category in active_categories for category in model['model_category'])
                 if not incompatible:
                     available_ai_models.pop(current_index)
                     active_ai_models.append(model)
-                    active_image_sizes.add(model['model_image_size'])
                     active_categories.update(model['model_category'])
                     if current_index >= len(available_ai_models):
                         current_index = len(available_ai_models) - 1
@@ -125,7 +131,6 @@ def open_ui(stdscr):
             elif current_list == 'active' and active_ai_models:
                 model = active_ai_models.pop(current_index)
                 available_ai_models.append(load_model_data(model['yaml_file_name']))
-                active_image_sizes = {model['model_image_size'] for model in active_ai_models}
                 active_categories = {category for model in active_ai_models for category in model['model_category']}
                 if current_index >= len(active_ai_models):
                     current_index = len(active_ai_models) - 1
@@ -136,7 +141,6 @@ def open_ui(stdscr):
             if current_list == 'active' and active_ai_models:
                 model = active_ai_models.pop(current_index)
                 available_ai_models.append(load_model_data(model['yaml_file_name']))
-                active_image_sizes = {model['model_image_size'] for model in active_ai_models}
                 active_categories = {category for model in active_ai_models for category in model['model_category']}
                 if current_index >= len(active_ai_models):
                     current_index = len(active_ai_models) - 1
@@ -145,11 +149,10 @@ def open_ui(stdscr):
                 active_ai_models.sort(key=lambda x: (x['model_category'][0], int(x['model_identifier'])))
             elif current_list == 'available' and available_ai_models:
                 model = available_ai_models[current_index]
-                incompatible = any(size != model['model_image_size'] for size in active_image_sizes) or any(category in active_categories for category in model['model_category'])
+                incompatible = any(category in active_categories for category in model['model_category'])
                 if not incompatible:
                     available_ai_models.pop(current_index)
                     active_ai_models.append(model)
-                    active_image_sizes.add(model['model_image_size'])
                     active_categories.update(model['model_category'])
                     if current_index >= len(available_ai_models):
                         current_index = len(available_ai_models) - 1

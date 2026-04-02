@@ -14,7 +14,7 @@ class ModelWrapper:
         self.outputs = outputs
 
 class Pipeline:
-    def __init__(self, configValues, model_manager, dynamic_ai_manager):
+    def __init__(self, configValues, model_manager, dynamic_ai_manager, pipeline_name=None):
         if not validate_string_list(configValues["inputs"]):
             raise ValueError("Error: Pipeline inputs must be a non-empty list of strings!")
         if not configValues["output"]:
@@ -33,39 +33,58 @@ class Pipeline:
 
 
         self.models = []
+        self._input_to_models = {}  # key -> list[ModelWrapper] index for O(1) event_handler lookup
         for model in configValues["models"]:
             if not validate_string_list(model["inputs"]):
                 raise ValueError("Error: Model inputs must be a non-empty list of strings!")
             if not model["name"]:
                 raise ValueError("Error: Model name must be a non-empty string!")
             modelName = model["name"]
-            if modelName == "dynamic_video_ai":
-                dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"])
-                self.models.extend(dynamic_models)
-                continue
-            elif modelName == "dynamic_image_ai":
-                dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"])
+            if modelName in ["dynamic_video_ai", "dynamic_image_ai", "dynamic_region_ai", "dynamic_ai"]:
+                if modelName == "dynamic_video_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_video_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
+                elif modelName == "dynamic_image_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_image_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
+                elif modelName == "dynamic_region_ai":
+                    dynamic_models = dynamic_ai_manager.get_dynamic_region_ai_models(model["inputs"], model["outputs"], pipeline_name=pipeline_name)
+                else:
+                    dynamic_models = dynamic_ai_manager.get_dynamic_models_from_config(model, pipeline_name=pipeline_name)
                 self.models.extend(dynamic_models)
                 continue
             returned_model = model_manager.get_or_create_model(modelName)
             self.models.append(ModelWrapper(returned_model, model["inputs"], model["outputs"]))
+
+        self._rebuild_input_index()
 
         categories_set = set()
         for model in self.models:
             if isinstance(model.model.model, AIModel):
                 for category in model.model.model.model_category:
                     if category in categories_set:
-                        raise ValueError("Error: AI models must not have overlapping categories!")
+                        logger.warning(
+                            f"Duplicate AI model category '{category}' detected in pipeline '{self.short_name}'. Allowing overlap for multi-stage flows."
+                        )
                     categories_set.add(category)
     
+    def _rebuild_input_index(self):
+        """Build a dict mapping each input key to the ModelWrappers that need it."""
+        self._input_to_models = {}
+        for model in self.models:
+            for input_name in model.inputs:
+                if input_name not in self._input_to_models:
+                    self._input_to_models[input_name] = []
+                self._input_to_models[input_name].append(model)
+
     async def event_handler(self, itemFuture, key):
         if key == self.output:
             itemFuture.close_future(itemFuture[key])
-        for model in self.models:
-            if key in model.inputs:
-                allOtherInputsPresent = all(inputName in itemFuture.data for inputName in model.inputs if inputName != key)
-                if allOtherInputsPresent:
-                    await model.model.add_to_queue(QueueItem(itemFuture, model.inputs, model.outputs))
+        matching_models = self._input_to_models.get(key)
+        if matching_models is None:
+            return
+        for model in matching_models:
+            allOtherInputsPresent = all(inputName in itemFuture.data for inputName in model.inputs if inputName != key)
+            if allOtherInputsPresent:
+                await model.model.add_to_queue(QueueItem(itemFuture, model.inputs, model.outputs))
 
     async def start_model_processing(self):
         for model in self.models:
@@ -87,7 +106,17 @@ class Pipeline:
         ai_models_info = []
         for model in self.models:
             if isinstance(model.model.model, AIModel):
-                ai_models_info.append(AIModelInfo(name=model.model.model.model_file_name, identifier=model.model.model.model_identifier, version=model.model.model.model_version, categories=model.model.model.model_category, type=model.model.model.model_type))
+                ai_models_info.append(
+                    AIModelInfo(
+                        name=model.model.model.model_file_name,
+                        identifier=model.model.model.model_identifier,
+                        version=model.model.model.model_version,
+                        categories=model.model.model.model_category,
+                        type=model.model.model.model_type,
+                        capabilities=model.model.model.model_capabilities,
+                        supported_scopes=model.model.model.supported_target_scopes,
+                    )
+                )
         return ai_models_info
 
 def validate_string_list(input_list):

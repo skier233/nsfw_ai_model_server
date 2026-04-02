@@ -18,13 +18,8 @@ import torchvision
 import numpy as np
 from deffcode import Sourcer
 
-try:
-    import decord
-    decord.bridge.set_bridge('torch')
-    _HAS_DECORD = True
-except Exception:  # pragma: no cover - optional dependency
-    decord = None
-    _HAS_DECORD = False
+from lib.pipeline.preprocess_spec import NORMALIZATION_PRESETS
+
 
 _DEFFCODE_LOG_SUPPRESSIONS = (
     "Manually discarding `frame_format`",
@@ -221,11 +216,13 @@ def _finalize_decoded_tensor(tensor: torch.Tensor, image_path: str) -> torch.Ten
     return _ensure_rgb_channels(tensor, image_path)
 
 def get_normalization_config(index, device):
-    normalization_configs = [
-        (torch.tensor([0.485, 0.456, 0.406], device=device), torch.tensor([0.229, 0.224, 0.225], device=device)),
-        (torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device), torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device)),
-    ]
-    return normalization_configs[index]
+    if index == -1:
+        return None, None
+    mean_list, std_list = NORMALIZATION_PRESETS[index]
+    return (
+        torch.tensor(mean_list, device=device),
+        torch.tensor(std_list, device=device),
+    )
 
 def custom_round(x, base=1):
     return base * round(x/base)
@@ -294,15 +291,6 @@ def get_video_duration_deffcode(video_path):
         if callable(terminate):
             terminate()
 
-def get_video_duration_decord(video_path):
-    if not _HAS_DECORD:
-        raise RuntimeError("decord is not installed; install decord to use this function")
-    video_path = _validate_local_video_source(video_path)
-    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-    num_frames = len(vr)
-    frame_rate = vr.get_avg_fps()
-    duration = num_frames / frame_rate
-    return duration
 
 def get_frame_transforms(
     use_half_precision,
@@ -311,10 +299,11 @@ def get_frame_transforms(
     vr_video: bool = False,
     img_size: int = 512,
     apply_resize: bool = True,
+    scale_values: bool = True,
 ):
     dtype = torch.float16 if use_half_precision else torch.float32
     transforms_list = [
-        transforms.ToDtype(dtype, scale=True),
+        transforms.ToDtype(dtype, scale=scale_values),
     ]
     if apply_resize:
         transforms_list.insert(0, transforms.Resize((img_size, img_size), interpolation=InterpolationMode.BICUBIC))
@@ -346,120 +335,13 @@ class DimensionError(Exception):
     def __repr__(self):
         return f"DimensionError({super().__str__()})"
 
-def preprocess_image(image_path, img_size=512, use_half_precision=True, device=None, norm_config=1):
-    # Resolve device
-    if device:
-        device = torch.device(device)
-    else:
-        # Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    mean, std = get_normalization_config(norm_config, device)
-
-    # Build the canonical transforms (resize -> dtype -> normalize)
-    frame_transforms = get_frame_transforms(
-        use_half_precision,
-        mean,
-        std,
-        vr_video=False,
-        img_size=img_size,
-        apply_resize=True,
-    )
-
-    # Read image via torchvision unless running on ROCm, where Pillow is needed for JPEGs.
-    img = _load_image_tensor(image_path)
-    # Move to target device and run transforms
-    img = img.to(device)
-    out = frame_transforms(img)
-
-    # Validate final tensor shape: (3, img_size, img_size)
-    if out.ndim != 3 or out.shape[0] != 3:
-        raise DimensionError(
-            f"Invalid Image: Image has invalid shape {tuple(out.shape)} for '{image_path}'; "
-            f"expected (3, {img_size}, {img_size})."
-        )
-
-    return out
-    
-
 def _prepare_frame(frame, device, vr_video, frame_transforms):
     tensor = _ensure_torch_tensor(frame, device, pin_memory=True, non_blocking=True)
-    
     if vr_video:
         tensor = vr_permute(tensor)
-    
     tensor = tensor.permute(2, 0, 1)
-    return frame_transforms(tensor) 
+    return frame_transforms(tensor)
 
-
-#TODO: TRY OTHER PREPROCESSING METHODS AND TRY MAKING PREPROCESSING TRUE ASYNC
-def preprocess_video(
-    video_path,
-    frame_interval=0.5,
-    img_size=512,
-    use_half_precision=True,
-    device=None,
-    use_timestamps=False,
-    vr_video=False,
-    norm_config=1,
-):
-    """
-    Preprocess video using decord (CPU-based).
-    Falls back to deffcode if decord is not available.
-    """
-    video_path = _validate_local_video_source(video_path)
-    if not _HAS_DECORD:
-        _LOGGER.warning("decord not available, falling back to deffcode CPU preprocessing")
-        yield from preprocess_video_deffcode(
-            video_path=video_path,
-            frame_interval=frame_interval,
-            img_size=img_size,
-            use_half_precision=use_half_precision,
-            device=device,
-            use_timestamps=use_timestamps,
-            vr_video=vr_video,
-            norm_config=norm_config,
-        )
-        return
-
-    if device:
-        device = torch.device(device)
-    else:
-        #Use CPU for Apple Silicon as well, because it cannot handle BICUBIC
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    mean, std = get_normalization_config(norm_config, device)
-
-    frame_transforms = get_frame_transforms(
-        use_half_precision,
-        mean,
-        std,
-        vr_video=vr_video,
-        img_size=img_size,
-        apply_resize=vr_video,  # Only apply resize for VR videos; decord handles it for non-VR
-    )
-    vr = None
-    if vr_video:
-        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-    else:
-        vr = decord.VideoReader(video_path, ctx=decord.cpu(0), width=img_size, height=img_size)
-    fps = float(vr.get_avg_fps()) or 30.0
-    frame_step = 1
-    if frame_interval and frame_interval > 0:
-        frame_step = max(1, round(fps * frame_interval))
-
-    processed = 0
-    for i in range(0, len(vr), frame_step):
-        frame_tensor = _prepare_frame(vr[i], device, vr_video, frame_transforms)
-        if use_timestamps:
-            if frame_interval and frame_interval > 0:
-                frame_index = processed * frame_interval
-            else:
-                frame_index = i / fps if fps else float(processed)
-        else:
-            frame_index = i
-        yield (frame_index, frame_tensor)
-        processed += 1
-    del vr
 
 def _parse_fps_value(value, default: float = 30) -> float:
     if value is None:
@@ -549,17 +431,22 @@ def preprocess_video_deffcode_auto(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    max_decode_long_edge=0,
+    gpu_min_long_edge=3600,
 ):
     """
-    Automatically select GPU or CPU preprocessing based on video resolution and GPU availability.
-    
-    Strategy:
-    - For high-resolution videos (4K+): Use GPU preprocessing to accelerate the bottleneck
-    - For lower-resolution videos: Use CPU preprocessing to avoid GPU contention with AI models
-    - Falls back gracefully if GPU preprocessing fails
-    
-    This approach maximizes overall throughput by using GPU resources where they provide 
-    the most benefit while avoiding GPU contention when AI inference is the bottleneck.
+    Automatically select GPU (NVDEC) or CPU preprocessing based on video resolution.
+
+    When the video's longest edge is >= *gpu_min_long_edge* AND a CUDA device is
+    available, DeFFcode GPU (NVDEC) decoding is used — it provides the biggest
+    win at high resolutions where decode bandwidth is the bottleneck.  For
+    lower-resolution videos, CPU decoding avoids contending with AI inference
+    for GPU resources.
+
+    *gpu_min_long_edge* defaults to 3600 (just below 4K) but can be tuned
+    per-pipeline via the ``gpu_min_long_edge`` config key in the preprocessor
+    model YAML.  Set to 0 to always use GPU, or a very large value to always
+    use CPU.
     """
     video_path = _validate_local_video_source(video_path)
     if device:
@@ -568,44 +455,44 @@ def preprocess_video_deffcode_auto(
         target_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     use_gpu_preprocessing = False
-    
+    min_long_edge = int(gpu_min_long_edge) if gpu_min_long_edge else 0
+
     # Determine if GPU preprocessing should be used based on resolution
     if target_device.type == 'cuda':
-        try:
-            # Probe video metadata to check resolution using the higher-level Sourcer API
-            sourcer = Sourcer(video_path).probe_stream()
+        if min_long_edge <= 0:
+            # 0 means always GPU
+            use_gpu_preprocessing = True
+            _LOGGER.debug("gpu_min_long_edge=0: always using GPU preprocessing")
+        else:
             try:
-                metadata = sourcer.retrieve_metadata()
-
-                width = metadata.get("source_video_resolution", [0, 0])[0]
-                height = metadata.get("source_video_resolution", [0, 0])[1]
-
-                # Use GPU preprocessing for 4K+ videos (with small margin for non-standard resolutions)
-                # 4K is typically 3840x2160, so we check for >= 3600 width or >= 1900 height
-                if width >= 3600 or height >= 1900:
-                    use_gpu_preprocessing = True
-                    _LOGGER.debug(
-                        "Video resolution %dx%d qualifies for GPU preprocessing",
-                        width,
-                        height,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Video resolution %dx%d will use CPU preprocessing to avoid GPU contention",
-                        width,
-                        height,
-                    )
-            finally:
-                terminate = getattr(sourcer, "terminate", None)
-                if callable(terminate):
-                    terminate()
-        except Exception as exc:
-            _LOGGER.warning(
-                "Failed to probe video resolution for '%s': %s. Defaulting to CPU preprocessing.",
-                video_path,
-                exc,
-            )
-            use_gpu_preprocessing = False
+                sourcer = Sourcer(video_path).probe_stream()
+                try:
+                    metadata = sourcer.retrieve_metadata()
+                    width = metadata.get("source_video_resolution", [0, 0])[0]
+                    height = metadata.get("source_video_resolution", [0, 0])[1]
+                    long_edge = max(width, height)
+                    if long_edge >= min_long_edge:
+                        use_gpu_preprocessing = True
+                        _LOGGER.debug(
+                            "Video resolution %dx%d (long edge %d >= %d): using GPU preprocessing",
+                            width, height, long_edge, min_long_edge,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Video resolution %dx%d (long edge %d < %d): using CPU preprocessing",
+                            width, height, long_edge, min_long_edge,
+                        )
+                finally:
+                    terminate = getattr(sourcer, "terminate", None)
+                    if callable(terminate):
+                        terminate()
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Failed to probe video resolution for '%s': %s. Defaulting to CPU preprocessing.",
+                    video_path,
+                    exc,
+                )
+                use_gpu_preprocessing = False
 
     # Try GPU preprocessing if determined appropriate
     if use_gpu_preprocessing:
@@ -620,6 +507,7 @@ def preprocess_video_deffcode_auto(
                 use_timestamps=use_timestamps,
                 vr_video=vr_video,
                 norm_config=norm_config,
+                max_decode_long_edge=max_decode_long_edge,
             ):
                 yielded_any = True
                 yield item
@@ -647,6 +535,7 @@ def preprocess_video_deffcode_auto(
         use_timestamps=use_timestamps,
         vr_video=vr_video,
         norm_config=norm_config,
+        max_decode_long_edge=max_decode_long_edge,
     )
 
 def preprocess_video_deffcode(
@@ -658,6 +547,7 @@ def preprocess_video_deffcode(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    max_decode_long_edge=0,
 ):
     """
     Preprocess video using CPU-based DeFFcode with FFmpeg filtering.
@@ -690,7 +580,8 @@ def preprocess_video_deffcode(
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=True,  # Always use PyTorch resize in CPU mode
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
     )
 
     # Build FFmpeg filter chain
@@ -720,9 +611,25 @@ def preprocess_video_deffcode(
     if frame_interval and frame_interval > 0 and source_fps:
         frame_step_frames = max(1, round(source_fps * frame_interval))
     
+    vf_parts = []
     if frame_step_frames > 1:
-        vf_filter = f"select='not(mod(n,{frame_step_frames}))'"
-        decoder_kwargs["-vf"] = vf_filter
+        vf_parts.append(f"select='not(mod(n,{frame_step_frames}))'")
+
+    # Downscale at FFmpeg level when max_decode_long_edge is set.
+    # This dramatically reduces per-frame data size before it reaches Python.
+    # Uses FFmpeg expressions: scale only if the source exceeds the cap.
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+    if _mdle > 0:
+        # scale='if(gt(max(iw,ih),CAP), if(gt(iw,ih), CAP, -2), iw)' : ...
+        # More readable: if long_edge > cap, scale down preserving aspect ratio.
+        vf_parts.append(
+            f"scale='if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(iw\\,ih)\\,{_mdle}\\,-2)\\,iw)'"
+            f":'if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(ih\\,iw)\\,{_mdle}\\,-2)\\,ih)'"
+            ":flags=bilinear"
+        )
+
+    if vf_parts:
+        decoder_kwargs["-vf"] = ",".join(vf_parts)
 
     decoder = decoder_cls(video_path, frame_format="rgb24", **decoder_kwargs).formulate()
 
@@ -734,7 +641,7 @@ def preprocess_video_deffcode(
             if frame is None:
                 continue
 
-            tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
+            result = _prepare_frame(frame, device, vr_video, frame_transforms)
 
             if use_timestamps:
                 if frame_interval and frame_interval > 0:
@@ -744,7 +651,7 @@ def preprocess_video_deffcode(
             else:
                 output_index = processed  # Use processed count as index
 
-            yield (output_index, tensor)
+            yield (output_index, result)
             processed += 1
     finally:
         terminate = getattr(decoder, "terminate", None)
@@ -761,6 +668,7 @@ def preprocess_video_deffcode_gpu(
     use_timestamps=False,
     vr_video=False,
     norm_config=1,
+    max_decode_long_edge=0,
 ):
     """
     Preprocess video using NVDEC hardware acceleration via DeFFcode.
@@ -785,7 +693,8 @@ def preprocess_video_deffcode_gpu(
         std,
         vr_video=vr_video,
         img_size=img_size,
-        apply_resize=True,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
     )
 
     # Probe metadata to determine the appropriate NVDEC decoder
@@ -841,6 +750,16 @@ def preprocess_video_deffcode_gpu(
             "format=nv12",
         ]
     )
+
+    # Downscale at FFmpeg level after hwdownload when max_decode_long_edge
+    # is set.  This reduces the per-frame data size before Python sees it.
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+    if _mdle > 0:
+        vf_filters.append(
+            f"scale='if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(iw\\,ih)\\,{_mdle}\\,-2)\\,iw)'"
+            f":'if(gt(max(iw\\,ih)\\,{_mdle})\\,if(gt(ih\\,iw)\\,{_mdle}\\,-2)\\,ih)'"
+            ":flags=bilinear"
+        )
     # Let DeFFcode handle the final nv12->rgb24 conversion (faster than in filter chain)
     decoder_kwargs = {
         "-vcodec": hw_decoder,
@@ -887,7 +806,7 @@ def preprocess_video_deffcode_gpu(
             if frame is None:
                 continue
 
-            tensor = _prepare_frame(frame, device, vr_video, frame_transforms)
+            result = _prepare_frame(frame, device, vr_video, frame_transforms)
 
             if use_timestamps:
                 if frame_interval and frame_interval > 0:
@@ -900,7 +819,7 @@ def preprocess_video_deffcode_gpu(
                 else:
                     output_index = index
 
-            yield (output_index, tensor)
+            yield (output_index, result)
             processed += 1
     finally:
         terminate = getattr(decoder, "terminate", None)
