@@ -16,6 +16,11 @@ class PipelineManager:
     
     async def load_pipelines(self, pipeline_strings):
         self.dynamic_ai_manager.set_known_pipelines(pipeline_strings)
+
+        # Phase 1: Construct all pipelines (creates models, wires DAG).
+        # No models are loaded to GPU yet, so we can count all models
+        # before computing VRAM-aware batch sizes.
+        constructed = []
         for pipeline in pipeline_strings:
             self.logger.info(f"Loading pipeline: {pipeline}")
             if not isinstance(pipeline, str):
@@ -24,13 +29,10 @@ class PipelineManager:
             try:
                 loaded_config = load_config(pipeline_config_path)
                 newpipeline = Pipeline(loaded_config, self.model_manager, self.dynamic_ai_manager, pipeline_name=pipeline)
-                self.pipelines[pipeline] = newpipeline
-                await newpipeline.start_model_processing()
-                self.logger.info(f"Pipeline {pipeline} V{newpipeline.version} loaded successfully!")
+                constructed.append((pipeline, newpipeline))
             except NoActiveModelsException as e:
                 raise e
             except Exception as e:
-                self.pipelines.pop(pipeline, None)
                 error_msg = str(e)
                 if "No active AI models matched dynamic expansion filters" in error_msg:
                     self.logger.warning(
@@ -41,7 +43,27 @@ class PipelineManager:
                 else:
                     self.logger.error(f"Error loading pipeline {pipeline}: {e}")
                     self.logger.debug("Exception details:", exc_info=True)
-            
+
+        if not constructed:
+            raise ServerStopException("Error: No valid pipelines loaded!")
+
+        # Phase 2: Compute optimal batch sizes using VRAM budget.
+        # Now that all models are registered, we can estimate total weight
+        # memory and allocate batch sizes that account for all loaded models.
+        self.model_manager.compute_vram_batch_sizes()
+
+        # Phase 3: Start all pipelines (loads models to GPU, starts workers).
+        for pipeline, newpipeline in constructed:
+            try:
+                await newpipeline.start_model_processing()
+                self.pipelines[pipeline] = newpipeline
+                self.logger.info(f"Pipeline {pipeline} V{newpipeline.version} loaded successfully!")
+            except NoActiveModelsException as e:
+                raise e
+            except Exception as e:
+                self.logger.error(f"Error starting pipeline {pipeline}: {e}")
+                self.logger.debug("Exception details:", exc_info=True)
+
         if not self.pipelines:
             raise ServerStopException("Error: No valid pipelines loaded!")
 

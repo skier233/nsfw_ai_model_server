@@ -54,6 +54,8 @@ class DynamicAIManager:
             raise NoActiveModelsException("Error: No active AI models found in active_ai.yaml")
         for model_name in self.ai_model_names:
             loaded_model = self.model_manager.get_or_create_model(model_name)
+            if loaded_model is not None:
+                loaded_model.config_name = model_name
             self.models_by_config_name[model_name] = loaded_model
             models.append(loaded_model)
         models = [model for model in models if model is not None]
@@ -115,8 +117,10 @@ class DynamicAIManager:
             )
         if normalized_mode == "region":
             return self._create_dynamic_region_wrappers(inputs, outputs, selected_models)
+        if normalized_mode == "audio":
+            return self._create_dynamic_audio_wrappers(inputs, outputs, selected_models, pipeline_name=pipeline_name)
 
-        raise ValueError(f"Error: Unsupported dynamic mode '{mode}'. Expected 'image', 'video', or 'region'.")
+        raise ValueError(f"Error: Unsupported dynamic mode '{mode}'. Expected 'image', 'video', 'region', or 'audio'.")
 
     def get_dynamic_models_from_config(self, model_config, pipeline_name=None):
         mode = model_config.get("dynamic_mode", None)
@@ -135,6 +139,9 @@ class DynamicAIManager:
 
     def get_dynamic_video_ai_models(self, inputs, outputs, pipeline_name=None):
         return self.get_dynamic_models(mode="video", inputs=inputs, outputs=outputs, pipeline_name=pipeline_name)
+
+    def get_dynamic_audio_ai_models(self, inputs, outputs, pipeline_name=None):
+        return self.get_dynamic_models(mode="audio", inputs=inputs, outputs=outputs, pipeline_name=pipeline_name)
 
     def get_dynamic_region_ai_models(self, inputs, outputs, required_capabilities=None, pipeline_name=None):
         return self.get_dynamic_models(
@@ -312,6 +319,83 @@ class DynamicAIManager:
         self.logger.debug("Finished creating dynamic Region AI models")
         return model_wrappers
 
+    def _create_dynamic_audio_wrappers(self, inputs, outputs, models, pipeline_name=None):
+        """Wire audio preprocessor → per-window AI models → coalescer → finisher → batch_awaiter.
+
+        Follows the video pipeline one-to-many pattern:
+        - The audio preprocessor extracts audio, separates vocals, detects speech
+          regions, and spawns one child ItemFuture per overlapping window.
+        - Each child flows independently through ECAPA-TDNN and AST.
+        - result_coalescer collects per-window model outputs.
+        - result_finisher marks the child future as done.
+        - batch_awaiter waits for all children and writes the aggregated list
+          to the parent future (outputs[0] = "childrenResults").
+        """
+        from lib.pipeline.audio_preprocess_spec import AudioPreprocessSpec as APS
+
+        model_wrappers = []
+
+        # ── Collect audio preprocessing specs from all models ──
+        spec_set = set()
+        model_to_spec = {}
+        for model in models:
+            spec = APS.for_model(model.model)
+            model_to_spec[id(model)] = spec
+            spec_set.add(spec)
+        all_specs = sorted(spec_set, key=lambda s: s.sample_rate, reverse=True)
+
+        # ── Create per-pipeline audio preprocessor ──
+        if pipeline_name:
+            _preproc_alias = f"audio_preprocessor_dynamic__{pipeline_name}"
+            audio_preprocessor = self.model_manager.get_or_create_model_alias(
+                "audio_preprocessor_dynamic", _preproc_alias
+            )
+        else:
+            audio_preprocessor = self.model_manager.get_or_create_model("audio_preprocessor_dynamic")
+        audio_preprocessor.model.specs = all_specs
+
+        fixed_outputs = ["dynamic_children", "window_index", "window_start", "window_end"]
+        spec_keys = [s.key for s in all_specs]
+        model_wrappers.append(ModelWrapper(audio_preprocessor, inputs, fixed_outputs + spec_keys))
+
+        # ── Wire per-window AI models ──
+        for model in models:
+            spec = model_to_spec[id(model)]
+            model_wrappers.append(ModelWrapper(
+                model,
+                [spec.key],
+                model.model.model_category,
+            ))
+
+        # ── Coalesce per-window results ──
+        coalesce_inputs = self._build_coalesce_inputs(models)
+        coalesce_inputs = _dedupe_strings(coalesce_inputs)
+        coalesce_inputs.insert(0, "window_index")
+        coalesce_inputs.insert(1, "window_start")
+        coalesce_inputs.insert(2, "window_end")
+        model_wrappers.append(ModelWrapper(
+            self.model_manager.get_or_create_model("result_coalescer"),
+            coalesce_inputs,
+            ["dynamic_result"],
+        ))
+
+        # ── Mark child future as done ──
+        model_wrappers.append(ModelWrapper(
+            self.model_manager.get_or_create_model("result_finisher"),
+            ["dynamic_result"],
+            [],
+        ))
+
+        # ── Await all children → aggregate into parent ──
+        model_wrappers.append(ModelWrapper(
+            self.model_manager.get_or_create_model("batch_awaiter"),
+            ["dynamic_children"],
+            outputs,
+        ))
+
+        self.logger.debug("Finished creating dynamic Audio AI models")
+        return model_wrappers
+
     def _select_models(self, required_capabilities=None, required_scope=None, mode=None, pipeline_name=None, model_config=None):
         normalized_capabilities = set(_normalize_string_list(required_capabilities) or [])
         normalized_scope = str(required_scope).strip() if required_scope is not None else None
@@ -344,6 +428,8 @@ class DynamicAIManager:
     def _infer_dynamic_stage(self, mode, normalized_capabilities):
         if str(mode or "").strip().lower() == "region":
             return "region"
+        if str(mode or "").strip().lower() == "audio":
+            return "audio"
         if "detection" in normalized_capabilities:
             return "detector"
         return "full_image"
@@ -554,7 +640,9 @@ class DynamicAIManager:
                     raise ValueError(f"Error: Dynamic AI models must have model_category set! {inner_model} does not have model_category set and needs a migration")
                 if inner_model.model_version is None:
                     raise ValueError(f"Error: Dynamic AI models must have model_version set! {inner_model} does not have model_version set and needs a migration")
-                if inner_model.model_image_size is None:
+                # Audio models don't use model_image_size — skip check for them.
+                is_audio = inner_model.model_type and "audio" in inner_model.model_type.lower()
+                if not is_audio and inner_model.model_image_size is None:
                     raise ValueError(f"Error: Dynamic AI models must have model_image_size set! {inner_model} does not have model_image_size set and needs a migration")
             except ValueError as e:
                 if second_pass:
@@ -568,12 +656,14 @@ class DynamicAIManager:
                 self.__verify_models(models, True)
                 return
 
-            if first_image_size is None:
+            if first_image_size is None and not is_audio:
                 first_image_size = inner_model.model_image_size
-            if first_norm_config is None:
+            if first_norm_config is None and not is_audio:
                 first_norm_config = inner_model.normalization_config
-        self.image_size = first_image_size
-        self.normalization_config = first_norm_config
+        if first_image_size is not None:
+            self.image_size = first_image_size
+        if first_norm_config is not None:
+            self.normalization_config = first_norm_config
         self.logger.debug("Finished verifying dynamic AI models")
 
     def _resolve_active_model_names(self):

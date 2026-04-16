@@ -244,6 +244,12 @@ class ModelCapabilitiesConfig:
             resolved = self._resolve_full_image_model_names(full_image_models, available_models)
             return resolved if resolved else None
 
+        if stage_name == "audio":
+            audio_models = entry.get("audio_models", None)
+            if audio_models is None:
+                return None
+            return self._resolve_audio_model_names(audio_models, available_models)
+
         return None
 
     def get_region_model_rules(self, pipeline_name: str) -> List[Dict[str, Any]]:
@@ -313,7 +319,7 @@ class ModelCapabilitiesConfig:
         if isinstance(raw_value, str):
             text = raw_value.strip().upper()
             if text == "ALL":
-                return self._resolve_all_tagging_model_names(available_models, exclude_names=[])
+                return self._resolve_all_full_image_model_names(available_models, exclude_names=[])
             raise ValueError("model_capabilities full_image_models string value must be 'ALL' or explicit list")
 
         if isinstance(raw_value, dict):
@@ -326,26 +332,90 @@ class ModelCapabilitiesConfig:
                 raise ValueError(
                     f"model_capabilities full_image_models.exclude references model(s) not in active_ai_models: {missing_excludes}"
                 )
-            return self._resolve_all_tagging_model_names(available_models, exclude_names=exclude_names)
+            return self._resolve_all_full_image_model_names(available_models, exclude_names=exclude_names)
 
         raise ValueError(
             "model_capabilities full_image_models must be one of: list, 'ALL', or {mode: 'ALL', exclude: [...]}"
         )
 
-    def _resolve_all_tagging_model_names(self, available_models: Optional[Sequence[Any]], exclude_names: List[str]) -> List[str]:
+    # Capabilities that qualify a model for full-image processing by default
+    _FULL_IMAGE_CAPABILITIES = {"tagging", "embedding"}
+
+    # Capabilities that qualify a model for audio processing by default
+    _AUDIO_CAPABILITIES = {"embedding", "classification"}
+
+    def _resolve_audio_model_names(self, raw_value: Any, available_models: Optional[Sequence[Any]]) -> List[str]:
+        """Resolve audio_models config value to a list of model names."""
+        if isinstance(raw_value, list):
+            names = _normalize_string_list(raw_value)
+            missing = [name for name in names if name not in self.active_model_library]
+            if missing:
+                raise ValueError(
+                    f"model_capabilities audio_models references model(s) not in active_ai_models: {missing}"
+                )
+            return names
+
+        if isinstance(raw_value, str) and raw_value.strip().upper() == "ALL":
+            return self._resolve_all_audio_model_names(available_models)
+
+        raise ValueError("model_capabilities audio_models must be 'ALL' or an explicit list")
+
+    def _resolve_all_audio_model_names(self, available_models: Optional[Sequence[Any]]) -> List[str]:
+        """Auto-discover all active models with audio-compatible capabilities/types."""
+        if not available_models:
+            return sorted(self.active_model_library)
+
+        resolved = []
+        for model in available_models:
+            model_name = str(
+                getattr(model, "config_name", None)
+                or getattr(model.model, "model_file_name", "")
+            ).strip()
+            if not model_name:
+                continue
+
+            model_type = str(getattr(model.model, "model_type", "") or "").lower()
+            capabilities = set(getattr(model.model, "model_capabilities", []) or [])
+
+            # Include models whose type starts with "audio" or have audio-compatible capabilities
+            if "audio" in model_type or (capabilities & self._AUDIO_CAPABILITIES and "audio" in model_type):
+                resolved.append(model_name)
+                continue
+
+            # Also accept models explicitly typed as audio_embedding or audio_classifier
+            config_type = str(getattr(model.model, "_config_type", "") or getattr(model, "_config_type", "")).lower()
+            if config_type.startswith("audio"):
+                resolved.append(model_name)
+
+        return resolved
+
+    def _resolve_all_full_image_model_names(self, available_models: Optional[Sequence[Any]], exclude_names: List[str]) -> List[str]:
         exclude_set = set(exclude_names)
         if not available_models:
             return [name for name in sorted(self.active_model_library) if name not in exclude_set]
 
         resolved = []
         for model in available_models:
-            model_name = str(getattr(model.model, "model_file_name", "")).strip()
+            # Prefer config_name (set by dynamic_ai_manager at load time) over model_file_name
+            # because models_by_config_name is keyed by config name, not file name
+            model_name = str(
+                getattr(model, "config_name", None)
+                or getattr(model.model, "model_file_name", "")
+            ).strip()
             if not model_name or model_name in exclude_set:
                 continue
-            capabilities = set(getattr(model.model, "model_capabilities", []) or [])
-            if "tagging" not in capabilities:
+
+            # Explicit opt-in/opt-out via model config (full_image_model: true/false)
+            explicit = getattr(model.model, "full_image_model", None)
+            if explicit is not None:
+                if explicit:
+                    resolved.append(model_name)
                 continue
-            resolved.append(model_name)
+
+            # Default: include if model has any full-image-compatible capability
+            capabilities = set(getattr(model.model, "model_capabilities", []) or [])
+            if capabilities & self._FULL_IMAGE_CAPABILITIES:
+                resolved.append(model_name)
         return resolved
 
 

@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from lib.model.postprocessing import tag_models, timeframe_processing
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult
 from lib.model.preprocessing.input_logic import process_video_preprocess
-from lib.server.api_definitions import ImagePathList, ImageRequestV3, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoRequestV3, VideoResult
+from lib.server.api_definitions import AudioRequest, ImagePathList, ImageRequestV3, OptimizeMarkerSettings, VideoPathList, ImageResult, VideoRequestV3, VideoResult
 from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
 import torch
 import time
@@ -369,6 +369,11 @@ async def get_capabilities():
             ),
             "image_tagging": pm.has_pipeline("image_pipeline_dynamic_v3"),
             "video_tagging": pm.has_pipeline("video_pipeline_dynamic_v3"),
+            "visual_embeddings": any(
+                "embedding" in set(getattr(m.model, "model_capabilities", []) or [])
+                for m in pm.model_manager.models.values()
+                if m is not None and hasattr(m, "model")
+            ),
             "loaded_pipelines": loaded,
         }
         return capabilities
@@ -376,6 +381,52 @@ async def get_capabilities():
         logger.error(f"Error getting capabilities: {e}")
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/process_audio/")
+async def process_audio(request: AudioRequest):
+    """Process audio files through the audio embedding pipeline.
+
+    Extracts audio from media files and produces speaker embeddings (ECAPA-TDNN)
+    and optionally AudioSet classification scores (AST) for gating/type-binning.
+    """
+    try:
+        audio_paths = request.paths
+        logger.info(f"Processing {len(audio_paths)} audio files")
+        pipeline_name = "audio_pipeline_v1"
+        if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
+            raise HTTPException(
+                status_code=501,
+                detail="Audio pipeline is not available. The required audio models are not active.",
+            )
+        timeout = _get_request_timeout()
+        futures = [
+            await server_manager.get_request_future(
+                [path, request.threshold], pipeline_name
+            )
+            for path in audio_paths
+        ]
+        if timeout > 0:
+            results = await asyncio.gather(
+                *[_await_with_timeout(f, timeout) for f in futures],
+                return_exceptions=True,
+            )
+        else:
+            results = await asyncio.gather(*futures, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                results[i] = {"error": str(result)}
+
+        return_payload = {
+            "result": results,
+        }
+        logger.debug(f"Returning Audio Result: {_sanitize_for_log(return_payload)}")
+        return return_payload
+    except Exception as e:
+        logger.error(f"Error processing audio: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/health")

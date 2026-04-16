@@ -21,7 +21,7 @@ def save_active_ai_models(active_ai_models):
         yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
 
 # Model types that represent user-selectable AI models in the active AI selector.
-_AI_MODEL_TYPES = {"model", "face_torch_export"}
+_AI_MODEL_TYPES = {"model", "face_torch_export", "visual_embedding", "audio_embedding", "audio_classifier"}
 
 def load_available_ai_models():
     models = []
@@ -44,7 +44,8 @@ def load_model_data(model_file_name):
 
 def display_model(stdscr, y, x, model, highlight=False, incompatible=False, reason=""):
     categories = ", ".join(model['model_category'])
-    display_text = f"{model['yaml_file_name']:<20} | {categories:<15} | {model['model_version']:<5} | {model['model_image_size']:<5} | {model['model_info']:<30}"
+    image_size = model.get('model_image_size') if model.get('model_image_size') is not None else '-'
+    display_text = f"{model['yaml_file_name']:<20} | {categories:<15} | {model['model_version']:<5} | {image_size:<5} | {model['model_info']:<30}"
     if highlight:
         stdscr.addstr(y, x, display_text, curses.A_REVERSE)
     elif incompatible:

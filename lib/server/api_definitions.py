@@ -51,3 +51,7 @@ class AIModelInfo(BaseModel):
     type: str
     capabilities: List[str] | None = None
     supported_scopes: List[str] | None = None
+
+class AudioRequest(BaseModel):
+    paths: List[str]
+    threshold: float = None

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -8,6 +9,8 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video_deffcode,
     preprocess_video_deffcode_gpu,
     preprocess_video_deffcode_auto,
+    preprocess_video_av,
+    preprocess_video_av_seek,
 )
 from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec
 
@@ -40,13 +43,28 @@ class VideoPreprocessorModel(Model):
         # Populated by the dynamic_ai_manager at pipeline construction.
         self.specs: list[PreprocessSpec] = []
 
+        # Limit how many preprocessed frames can be in-flight before the
+        # preprocessor pauses to let GPU inference catch up.  Prevents
+        # RAM exhaustion on long videos with heavy pipelines (e.g. face).
+        # 0 or null = unlimited.
+        _max_pending = configValues.get("max_pending_frames", 0)
+        self._max_pending_frames = int(_max_pending) if _max_pending else 0
+
         # When using deffcode_auto, GPU decoding is chosen only when the
         # video's longest edge is >= this threshold.  0 = always GPU.
         self._gpu_min_long_edge = int(configValues.get("gpu_min_long_edge", 3600))
 
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
-        if requested_backend == "deffcode_gpu":
+        if requested_backend == "av":
+            self._preprocess_backend = "av"
+            self._preprocess_callable = preprocess_video_av
+            self.logger.info("Video preprocessor using PyAV threaded backend")
+        elif requested_backend == "av_seek":
+            self._preprocess_backend = "av_seek"
+            self._preprocess_callable = preprocess_video_av_seek
+            self.logger.info("Video preprocessor using PyAV seek backend")
+        elif requested_backend == "deffcode_gpu":
             if not torch.cuda.is_available():
                 self.logger.warning(
                     "CUDA is not available; falling back to DeFFcode CPU backend for video preprocessing"
@@ -145,24 +163,52 @@ class VideoPreprocessorModel(Model):
                         raise
 
                 spec_start = self.FIXED_OUTPUT_COUNT
+                frame_semaphore = None
+                if self._max_pending_frames > 0:
+                    frame_semaphore = asyncio.Semaphore(self._max_pending_frames)
                 frame_iterator = iter(frame_source)
+                loop = asyncio.get_running_loop()
+
+                _SENTINEL = object()  # signals iterator exhaustion from thread
+
+                def _decode_and_apply_specs(frame_iterator, specs, output_names, spec_start):
+                    """Decode one frame and apply all specs (CPU-bound work).
+
+                    Runs in a thread pool so the event loop stays free for
+                    AI model batch collection during video processing.
+                    Returns _SENTINEL when the iterator is exhausted.
+                    """
+                    frame_data = next(frame_iterator, _SENTINEL)
+                    if frame_data is _SENTINEL:
+                        return _SENTINEL
+
+                    frame_index = frame_data[0]
+                    raw_frame = frame_data[1]
+                    del frame_data
+
+                    if raw_frame.dtype != torch.half:
+                        raw_frame = raw_frame.half()
+
+                    spec_tensors = {}
+                    for i, spec in enumerate(specs):
+                        spec_tensors[output_names[spec_start + i]] = apply_spec(raw_frame, spec)
+
+                    del raw_frame
+                    return frame_index, spec_tensors
+
                 try:
                     while True:
                         chunk_start = time.perf_counter()
-                        try:
-                            frame_data = next(frame_iterator)
-                        except StopIteration:
+                        result = await loop.run_in_executor(
+                            None, _decode_and_apply_specs,
+                            frame_iterator, self.specs, item.output_names, spec_start,
+                        )
+                        if result is _SENTINEL:
                             break
+                        frame_index, spec_tensors = result
                         preprocess_time += time.perf_counter() - chunk_start
 
                         frame_count += 1
-                        frame_index = frame_data[0]
-                        raw_frame = frame_data[1]
-                        del frame_data  # release decoder buffer reference
-
-                        # Ensure float32 [0,255] for apply_spec.
-                        if raw_frame.dtype != torch.float32:
-                            raw_frame = raw_frame.float()
 
                         # Build per-frame child payload.
                         payload = {
@@ -171,14 +217,12 @@ class VideoPreprocessorModel(Model):
                             item.output_names[3]: itemFuture[item.input_names[4]],
                             item.output_names[4]: itemFuture[item.input_names[6]],
                         }
-
-                        # Apply every spec to produce the per-frame tensors.
-                        for i, spec in enumerate(self.specs):
-                            tensor = apply_spec(raw_frame, spec)
-                            payload[item.output_names[spec_start + i]] = tensor
-
-                        del raw_frame
+                        payload.update(spec_tensors)
+                        if frame_semaphore is not None:
+                            await frame_semaphore.acquire()
                         result = await ItemFuture.create(item, payload, item.item_future.handler)
+                        if frame_semaphore is not None:
+                            result.future.add_done_callback(lambda _, s=frame_semaphore: s.release())
                         children.append(result)
                 finally:
                     close = getattr(frame_source, "close", None)

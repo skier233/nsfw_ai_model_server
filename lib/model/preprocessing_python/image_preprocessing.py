@@ -432,7 +432,7 @@ def preprocess_video_deffcode_auto(
     vr_video=False,
     norm_config=1,
     max_decode_long_edge=0,
-    gpu_min_long_edge=3600,
+    gpu_min_long_edge=30600,
 ):
     """
     Automatically select GPU (NVDEC) or CPU preprocessing based on video resolution.
@@ -825,3 +825,232 @@ def preprocess_video_deffcode_gpu(
         terminate = getattr(decoder, "terminate", None)
         if callable(terminate):
             terminate()
+
+
+# ---------------------------------------------------------------------------
+# PyAV backends
+# ---------------------------------------------------------------------------
+
+def _av_resize_frame_if_needed(frame_np, max_long_edge: int):
+    """Downscale a numpy HWC frame so its longest edge <= *max_long_edge*."""
+    if max_long_edge <= 0:
+        return frame_np
+    h, w = frame_np.shape[:2]
+    long_edge = max(h, w)
+    if long_edge <= max_long_edge:
+        return frame_np
+    scale = max_long_edge / long_edge
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
+    try:
+        import cv2
+        return cv2.resize(frame_np, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    except ImportError:
+        import PIL.Image
+        img = PIL.Image.fromarray(frame_np)
+        img = img.resize((new_w, new_h), PIL.Image.BILINEAR)
+        return np.asarray(img)
+
+
+def preprocess_video_av(
+    video_path,
+    frame_interval=0.5,
+    img_size=512,
+    use_half_precision=True,
+    device=None,
+    use_timestamps=False,
+    vr_video=False,
+    norm_config=1,
+    max_decode_long_edge=0,
+    **_kwargs,
+):
+    """Preprocess video using PyAV with multi-threaded decoding.
+
+    Decodes every frame and skips in Python (like the DeFFcode CPU backend).
+    ``stream.thread_type = "AUTO"`` lets libav use frame- or slice-level
+    threading for the codec, which is competitive with DeFFcode on 1080p
+    and faster on 4K content.
+    """
+    import av
+
+    video_path = _validate_local_video_source(video_path)
+    if device:
+        device = torch.device(device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    mean, std = get_normalization_config(norm_config, device)
+    frame_transforms = get_frame_transforms(
+        use_half_precision,
+        mean,
+        std,
+        vr_video=vr_video,
+        img_size=img_size,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
+    )
+
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+
+    container = av.open(str(video_path))
+    try:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+
+        source_fps = float(stream.average_rate) if stream.average_rate else 30.0
+        frame_step = max(1, round(source_fps * frame_interval)) if frame_interval and frame_interval > 0 else 1
+
+        processed = 0
+        for index, frame in enumerate(container.decode(video=0)):
+            if frame_step > 1 and (index % frame_step) != 0:
+                continue
+
+            frame_np = frame.to_ndarray(format="rgb24")
+            if _mdle > 0:
+                frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
+
+            result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
+
+            if use_timestamps:
+                output_index = processed * frame_interval if (frame_interval and frame_interval > 0) else index / source_fps
+            else:
+                output_index = processed
+
+            yield (output_index, result)
+            processed += 1
+    finally:
+        container.close()
+
+
+def preprocess_video_av_seek(
+    video_path,
+    frame_interval=0.5,
+    img_size=512,
+    use_half_precision=True,
+    device=None,
+    use_timestamps=False,
+    vr_video=False,
+    norm_config=1,
+    max_decode_long_edge=0,
+    **_kwargs,
+):
+    """Preprocess video using PyAV with seek-based frame extraction.
+
+    Instead of decoding every frame, this seeks to each target timestamp
+    and decodes only one frame per seek.  Much faster than full-decode
+    when ``frame_interval`` is large (>= 1 s) or the video is long,
+    because it skips most of the bitstream entirely.
+
+    A background prefetch thread runs the seek loop ahead of the consumer
+    so that seek I/O overlaps with downstream GPU inference.  PyAV's
+    C-level seek/decode releases the GIL, making true concurrency possible.
+    """
+    import av
+
+    video_path = _validate_local_video_source(video_path)
+    if device:
+        device = torch.device(device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    mean, std = get_normalization_config(norm_config, device)
+    frame_transforms = get_frame_transforms(
+        use_half_precision,
+        mean,
+        std,
+        vr_video=vr_video,
+        img_size=img_size,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
+    )
+
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+
+    container = av.open(str(video_path))
+    try:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+
+        # Determine duration in seconds
+        if stream.duration and stream.time_base:
+            duration = float(stream.duration * stream.time_base)
+        elif container.duration:
+            duration = container.duration / av.time_base
+        else:
+            duration = 0.0
+
+        if not frame_interval or frame_interval <= 0:
+            frame_interval = 1.0 / (float(stream.average_rate) if stream.average_rate else 30.0)
+
+        time_base = stream.time_base
+
+        # ---- prefetch machinery ----
+        # The background thread runs ONLY the GIL-free C-level work:
+        # seek, decode, to_ndarray, and optional cv2 resize.  All
+        # Python/torch work (_prepare_frame) stays on the consumer side
+        # so it doesn't compete with model inference for the GIL.
+        _PREFETCH_DEPTH = 4
+        _SENTINEL = None  # signals end-of-stream or error
+        prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+        prefetch_error: list = []  # mutable container for thread exception
+
+        def _prefetch_worker():
+            """Seek-decode loop that feeds *prefetch_q* with raw numpy frames."""
+            try:
+                idx = 0
+                t = 0.0
+                while t < duration:
+                    target_pts = int(t / time_base)
+                    container.seek(target_pts, stream=stream)
+
+                    frame = None
+                    for f in container.decode(video=0):
+                        frame = f
+                        break
+                    if frame is None:
+                        break
+
+                    # All C-level / GIL-free work:
+                    frame_np = frame.to_ndarray(format="rgb24")
+                    if _mdle > 0:
+                        frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
+
+                    if use_timestamps:
+                        out_idx = t
+                    else:
+                        out_idx = idx
+
+                    prefetch_q.put((out_idx, frame_np))  # blocks if queue is full
+                    idx += 1
+                    t += frame_interval
+            except Exception as exc:
+                prefetch_error.append(exc)
+            finally:
+                prefetch_q.put(_SENTINEL)
+
+        worker = threading.Thread(target=_prefetch_worker, daemon=True)
+        worker.start()
+
+        try:
+            while True:
+                item = prefetch_q.get()
+                if item is _SENTINEL:
+                    if prefetch_error:
+                        raise prefetch_error[0]
+                    return
+                out_idx, frame_np = item
+                # Torch work runs on consumer thread — no GIL contention
+                # with the prefetch thread's C-level seeks.
+                result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
+                yield (out_idx, result)
+        finally:
+            # Drain the queue so the worker thread isn't blocked on put()
+            # and can terminate cleanly.
+            while worker.is_alive():
+                try:
+                    prefetch_q.get_nowait()
+                except queue.Empty:
+                    break
+            worker.join(timeout=2.0)
+    finally:
+        container.close()

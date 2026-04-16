@@ -113,7 +113,7 @@ class ModelProcessor():
             await item.item_future.set_data(output, Skip())
 
     async def batch_data_append_with_skips(self, batch_data, item):
-        if self.is_ai_model:
+        if self.is_ai_model and len(item.input_names) > 3:
             skipped_categories = item.item_future[item.input_names[3]]
             if skipped_categories is not None:
                 this_ai_categories = self.model.model_category

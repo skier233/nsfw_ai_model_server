@@ -36,15 +36,31 @@ class PreprocessSpec:
     device: str = "gpu"       # "cpu" or "gpu".
     half_precision: bool = False
     max_long_edge: int = 0    # 0 = no cap; >0 = cap longest edge (preserving aspect).
+    center_crop: bool = False # True = resize shortest edge then center-crop (CLIP-style).
+    interpolation: str = "bilinear"  # "bilinear" or "bicubic".
+    precision: str = ""       # "float16", "bfloat16", "float32", or "" (auto from half_precision).
+
+    @property
+    def effective_dtype(self) -> torch.dtype:
+        """Resolved dtype: explicit precision field wins, else half_precision flag."""
+        if self.precision == "bfloat16":
+            return torch.bfloat16
+        if self.precision == "float16" or (not self.precision and self.half_precision):
+            return torch.float16
+        return torch.float32
 
     @property
     def key(self) -> str:
         """Deterministic, human-readable pipeline-data key."""
         size = f"{self.width}x{self.height}" if (self.width or self.height) else "native"
         norm = "raw" if self.normalization == -1 else f"n{self.normalization}"
-        prec = "f16" if self.half_precision else "f32"
+        dtype = self.effective_dtype
+        prec_map = {torch.float16: "f16", torch.bfloat16: "bf16", torch.float32: "f32"}
+        prec = prec_map.get(dtype, "f32")
         cap = f"_max{self.max_long_edge}" if self.max_long_edge > 0 else ""
-        return f"prep__{size}_{norm}_{self.device}_{prec}{cap}"
+        crop = "_ccrop" if self.center_crop else ""
+        interp = f"_{self.interpolation}" if self.interpolation != "bilinear" else ""
+        return f"prep__{size}_{norm}_{self.device}_{prec}{cap}{crop}{interp}"
 
     @property
     def effective_resolution(self) -> int:
@@ -79,6 +95,9 @@ class PreprocessSpec:
                 device=pc.get("device", "gpu"),
                 half_precision=pc.get("half_precision", False),
                 max_long_edge=pc.get("max_long_edge", 0),
+                center_crop=pc.get("center_crop", False),
+                interpolation=pc.get("interpolation", "bilinear"),
+                precision=pc.get("precision", ""),
             )
 
         face_role = getattr(model_inner, "face_model_role", None)
@@ -144,13 +163,32 @@ def apply_spec(source: torch.Tensor, spec: PreprocessSpec) -> torch.Tensor:
     t = source
     h, w = t.shape[-2], t.shape[-1]
     resized = False
+    interp_mode = "bicubic" if spec.interpolation == "bicubic" else "bilinear"
 
     # 1. Resize -----------------------------------------------------------
     if spec.width > 0 and spec.height > 0:
-        if h != spec.height or w != spec.width:
+        if spec.center_crop:
+            # CLIP-style: resize shortest edge, then center-crop.
+            short_edge = min(h, w)
+            target_short = min(spec.width, spec.height)
+            if short_edge != target_short or h == w:
+                scale = target_short / short_edge
+                new_h = max(1, round(h * scale))
+                new_w = max(1, round(w * scale))
+                t = F.interpolate(
+                    t.unsqueeze(0), size=(new_h, new_w),
+                    mode=interp_mode, align_corners=False,
+                ).squeeze(0)
+            # Center-crop to target size.
+            ch, cw = t.shape[-2], t.shape[-1]
+            top = (ch - spec.height) // 2
+            left = (cw - spec.width) // 2
+            t = t[:, top : top + spec.height, left : left + spec.width]
+            resized = True
+        elif h != spec.height or w != spec.width:
             t = F.interpolate(
                 t.unsqueeze(0), size=(spec.height, spec.width),
-                mode="bilinear", align_corners=False,
+                mode=interp_mode, align_corners=False,
             ).squeeze(0)
             resized = True
     elif spec.max_long_edge > 0:
@@ -161,7 +199,7 @@ def apply_spec(source: torch.Tensor, spec: PreprocessSpec) -> torch.Tensor:
             new_w = max(1, round(w * scale))
             t = F.interpolate(
                 t.unsqueeze(0), size=(new_h, new_w),
-                mode="bilinear", align_corners=False,
+                mode=interp_mode, align_corners=False,
             ).squeeze(0)
             resized = True
 
@@ -186,7 +224,7 @@ def apply_spec(source: torch.Tensor, spec: PreprocessSpec) -> torch.Tensor:
         t = (t - mean) / std
 
     # 4. Precision --------------------------------------------------------
-    if spec.half_precision:
-        t = t.half()
+    if spec.half_precision or spec.precision:
+        t = t.to(spec.effective_dtype)
 
     return t

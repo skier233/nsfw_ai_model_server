@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import numpy as np
 import torch
 from lib.async_lib.async_processing import ItemFuture
 from lib.model.preprocessing_python.image_preprocessing import get_video_duration_deffcode
@@ -305,6 +306,227 @@ async def image_result_postprocessor_v3(data):
             del itemFuture.data["pipeline"]
 
         payload = {"result": toReturn, "results_v2": results_v2, "metrics": metrics}
+
+        await itemFuture.set_data(item.output_names[0], payload)
+
+
+async def audio_result_postprocessor(data):
+    """Post-processor for the audio embedding pipeline.
+
+    Receives per-window collated results from batch_awaiter, then:
+      1. AST semantic filtering — reject windows dominated by music
+      2. Type-binning — classify kept windows as moan/speech/breath
+      3. Per-type centroid embedding — mean of ECAPA vectors per type, L2-normalised
+      4. Overall centroid — mean of all kept ECAPA vectors
+    """
+    for item in data:
+        itemFuture = item.item_future
+        children_results = itemFuture[item.input_names[0]]  # list of per-window dicts
+        audio_path = itemFuture[item.input_names[1]] if len(item.input_names) > 1 else "unknown"
+
+        root_future = getattr(itemFuture, "root_future", itemFuture)
+        metrics_source = getattr(root_future, "_pipeline_metrics", {}) or {}
+        metrics = dict(metrics_source)
+
+        if not isinstance(children_results, list):
+            children_results = []
+
+        # ── AudioSet category indices ──
+        # Whitelist: human non-speech vocalizations we want to keep
+        IDX_WHITELIST = [8, 9, 14, 22, 24, 25, 38, 39, 44, 45, 46]
+        # Speech
+        IDX_SPEECH = [0, 1, 2, 3, 4, 5, 15]
+        # Music (reject if dominant)
+        IDX_MUSIC = [
+            27, 28, 32, 33, 34, 137, 138, 140, 141, 142, 143, 144, 145, 146,
+            153, 154, 162, 163, 164, 165, 166, 167, 168, 184, 266, 270,
+        ]
+        # Type bins for kept windows
+        IDX_MOAN = [25, 38, 39, 22, 24, 44, 45, 46, 14, 8, 9]
+        IDX_BREATH = [41, 26, 43]
+
+        threshold = 0.01  # AST sigmoid scores are typically low for specific classes
+
+        kept_windows = []
+        rejected_music = 0
+        rejected_quiet = 0
+
+        for win in children_results:
+            if not isinstance(win, dict):
+                continue
+            if "_error" in win:
+                continue
+
+            # Extract AST probabilities
+            ast_list = win.get("audio_classification_ast", [])
+            probs = None
+            if ast_list and isinstance(ast_list, list) and isinstance(ast_list[0], dict):
+                probs = ast_list[0].get("probabilities")
+
+            if probs is None:
+                # No classification available — keep by default
+                kept_windows.append(win)
+                continue
+
+            # Compute category scores
+            music_score = max((probs[i] for i in IDX_MUSIC if i < len(probs)), default=0.0)
+            whitelist_score = max((probs[i] for i in IDX_WHITELIST if i < len(probs)), default=0.0)
+            speech_score = max((probs[i] for i in IDX_SPEECH if i < len(probs)), default=0.0)
+
+            # Reject music-dominated windows
+            if music_score > 0.05 and music_score > max(whitelist_score, speech_score):
+                rejected_music += 1
+                continue
+
+            # Keep if any relevant vocal activity
+            keep_score = max(whitelist_score, speech_score)
+            if keep_score < threshold:
+                rejected_quiet += 1
+                continue
+
+            # Annotate window with scores for downstream use
+            win["_scores"] = {
+                "whitelist": round(whitelist_score, 4),
+                "speech": round(speech_score, 4),
+                "music": round(music_score, 4),
+            }
+            kept_windows.append(win)
+
+        # ── Type-binning ──
+        type_bins = {"moan": [], "speech": [], "breath": []}
+
+        for win in kept_windows:
+            probs = None
+            ast_list = win.get("audio_classification_ast", [])
+            if ast_list and isinstance(ast_list, list) and isinstance(ast_list[0], dict):
+                probs = ast_list[0].get("probabilities")
+
+            # Extract embedding vector
+            emb_list = win.get("audio_embeddings_ecapa", [])
+            vector = None
+            if emb_list and isinstance(emb_list, list) and isinstance(emb_list[0], dict):
+                vector = emb_list[0].get("vector")
+
+            if vector is None:
+                continue
+
+            if probs is not None:
+                moan_score = max((probs[i] for i in IDX_MOAN if i < len(probs)), default=0.0)
+                speech_score = max((probs[i] for i in IDX_SPEECH if i < len(probs)), default=0.0)
+                breath_score = max((probs[i] for i in IDX_BREATH if i < len(probs)), default=0.0)
+
+                scores = {"moan": moan_score, "speech": speech_score, "breath": breath_score}
+                dominant = max(scores, key=scores.get)
+                win["_dominant_type"] = dominant
+            else:
+                dominant = "moan"  # default bin
+                win["_dominant_type"] = dominant
+
+            type_bins[dominant].append(vector)
+
+        # ── Per-type centroid embeddings ──
+        embeddings = {}
+        for type_name, vectors in type_bins.items():
+            if not vectors:
+                continue
+            arr = np.array(vectors, dtype=np.float32)
+            centroid = arr.mean(axis=0)
+            norm = float(np.linalg.norm(centroid))
+            if norm > 1e-8:
+                centroid = centroid / norm
+            embeddings[type_name] = {
+                "centroid": centroid.tolist(),
+                "norm": round(float(np.linalg.norm(centroid)), 6),
+                "dim": int(centroid.shape[0]),
+                "window_count": len(vectors),
+            }
+
+        # ── Overall centroid ──
+        all_vectors = [v for vecs in type_bins.values() for v in vecs]
+        overall_centroid = None
+        if all_vectors:
+            arr = np.array(all_vectors, dtype=np.float32)
+            centroid = arr.mean(axis=0)
+            norm = float(np.linalg.norm(centroid))
+            if norm > 1e-8:
+                centroid = centroid / norm
+            overall_centroid = {
+                "centroid": centroid.tolist(),
+                "norm": round(float(np.linalg.norm(centroid)), 6),
+                "dim": int(centroid.shape[0]),
+                "window_count": len(all_vectors),
+            }
+
+        # ── Duration computation (merge overlapping windows per type) ──
+        def _merge_intervals(intervals):
+            """Merge overlapping/adjacent (start, end) intervals, return total seconds."""
+            if not intervals:
+                return 0.0, []
+            sorted_iv = sorted(intervals)
+            merged = [sorted_iv[0]]
+            for s, e in sorted_iv[1:]:
+                if s <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            total = sum(e - s for s, e in merged)
+            return total, merged
+
+        type_windows = {"moan": [], "speech": [], "breath": []}
+        all_kept_intervals = []
+        for win in kept_windows:
+            start = win.get("window_start")
+            end = win.get("window_end")
+            if start is None or end is None:
+                continue
+            dominant = win.get("_dominant_type", "unknown")
+            if dominant in type_windows:
+                type_windows[dominant].append((start, end))
+            all_kept_intervals.append((start, end))
+
+        duration_by_type = {}
+        for type_name, intervals in type_windows.items():
+            secs, _ = _merge_intervals(intervals)
+            if secs > 0:
+                duration_by_type[type_name] = round(secs, 2)
+
+        total_kept_duration, _ = _merge_intervals(all_kept_intervals)
+
+        # ── Build response ──
+        metrics["windows_total"] = len(children_results)
+        metrics["windows_kept"] = len(kept_windows)
+        metrics["windows_rejected_music"] = rejected_music
+        metrics["windows_rejected_quiet"] = rejected_quiet
+        metrics["type_counts"] = {k: len(v) for k, v in type_bins.items()}
+
+        if hasattr(itemFuture, "data") and isinstance(itemFuture.data, dict):
+            itemFuture.data.pop("pipeline", None)
+
+        payload = {
+            "embeddings": embeddings,
+            "overall_embedding": overall_centroid,
+            "classification_summary": {
+                "windows_analyzed": len(children_results),
+                "windows_kept": len(kept_windows),
+                "rejected_music": rejected_music,
+                "rejected_quiet": rejected_quiet,
+                "type_distribution": {k: len(v) for k, v in type_bins.items()},
+                "duration_seconds": duration_by_type,
+                "total_kept_duration_seconds": round(total_kept_duration, 2),
+            },
+            "windows": [
+                {
+                    "index": w.get("window_index"),
+                    "start": w.get("window_start"),
+                    "end": w.get("window_end"),
+                    "dominant_type": w.get("_dominant_type", "unknown"),
+                    "scores": w.get("_scores", {}),
+                }
+                for w in kept_windows
+            ],
+            "metrics": metrics,
+            "source": str(audio_path),
+        }
 
         await itemFuture.set_data(item.output_names[0], payload)
 

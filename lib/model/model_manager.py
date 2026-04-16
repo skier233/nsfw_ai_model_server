@@ -6,9 +6,14 @@ from lib.model.ai_model import AIModel
 from lib.model.ai_tagging_model import AITaggingModel
 from lib.model.ai_face_detection_model import AIFaceDetectionModel
 from lib.model.ai_face_embedding_model import AIFaceEmbeddingModel
+from lib.model.ai_visual_embedding_model import AIVisualEmbeddingModel
+from lib.model.ai_audio_embedding_model import AIAudioEmbeddingModel
+from lib.model.ai_audio_classifier_model import AIAudioClassifierModel
 from lib.model.python_model import PythonModel
 from lib.model.video_preprocessor import VideoPreprocessorModel
 from lib.model.image_preprocessor import ImagePreprocessorModel
+from lib.model.audio_preprocessor import AudioPreprocessorModel
+from lib.utils.vram_budget import compute_batch_sizes
 
 
 class ModelManager:
@@ -57,22 +62,61 @@ class ModelManager:
             case "model":
                 model_processor = ModelProcessor(AITaggingModel(model_config))
                 self.ai_models.append(model_processor)
-                model_count = len(self.ai_models)
-                if model_count > 1:
-                    for model_processor in self.ai_models:
-                        ai_model = model_processor.model
-                        ai_model.update_batch_with_mutli_models(model_count)
-                        model_processor.update_values_from_child_model()
-
-
                 return model_processor
             case "face_torch_export":
                 role = str(model_config.get("face_model_role", "detection")).lower()
                 if role == "embedding":
-                    return ModelProcessor(AIFaceEmbeddingModel(model_config))
+                    model_processor = ModelProcessor(AIFaceEmbeddingModel(model_config))
                 else:
-                    return ModelProcessor(AIFaceDetectionModel(model_config))
+                    model_processor = ModelProcessor(AIFaceDetectionModel(model_config))
+                self.ai_models.append(model_processor)
+                return model_processor
             case "python":
                 return ModelProcessor(PythonModel(model_config))
+            case "visual_embedding":
+                model_processor = ModelProcessor(AIVisualEmbeddingModel(model_config))
+                self.ai_models.append(model_processor)
+                return model_processor
+            case "audio_embedding":
+                model_processor = ModelProcessor(AIAudioEmbeddingModel(model_config))
+                self.ai_models.append(model_processor)
+                return model_processor
+            case "audio_classifier":
+                model_processor = ModelProcessor(AIAudioClassifierModel(model_config))
+                self.ai_models.append(model_processor)
+                return model_processor
+            case "audio_preprocessor":
+                return ModelProcessor(AudioPreprocessorModel(model_config))
             case _:
                 raise ValueError(f"Model type {model_config['type']} not recognized!")
+
+    def compute_vram_batch_sizes(self):
+        """Recompute batch sizes for all AI models using VRAM budget allocation.
+
+        Should be called after all models are created but before they are loaded,
+        so that weight estimates reflect the full set of active models.
+        """
+        if not self.ai_models:
+            return
+        ai_model_instances = [mp.model for mp in self.ai_models
+                              if mp is not None and isinstance(mp.model, AIModel)]
+        if not ai_model_instances:
+            return
+        device = ai_model_instances[0].device
+
+        # Find max_pending_frames from any video preprocessor
+        max_pending_frames = 0
+        for mp in self.models.values():
+            if mp is None:
+                continue
+            inner = getattr(mp, 'model', None)
+            if inner is not None and hasattr(inner, '_max_pending_frames'):
+                max_pending_frames = max(max_pending_frames,
+                                         inner._max_pending_frames)
+
+        compute_batch_sizes(ai_model_instances, device,
+                            max_pending_frames=max_pending_frames)
+        # Sync ModelProcessor fields with updated child model values
+        for mp in self.ai_models:
+            if mp is not None:
+                mp.update_values_from_child_model()

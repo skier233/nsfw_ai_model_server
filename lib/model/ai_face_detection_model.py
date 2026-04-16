@@ -34,9 +34,6 @@ class AIFaceDetectionModel(AIModel):
             f"Processed {len(data)} images in {time.time() - batch_started_at} in {self.model_file_name} ({self.model_category})"
         )
 
-    async def load(self):
-        await super().load()
-
     def _run_detection_item(self, item):
         item_future = item.item_future
         threshold = item_future[item.input_names[1]]
@@ -62,6 +59,9 @@ class AIFaceDetectionModel(AIModel):
                 entry["kps"] = [[float(x), float(y)] for x, y in kpss[index]]
             output.append(entry)
         return output
+
+    async def load(self):
+        await super().load()
 
     def _resolve_image_for_detection(self, item):
         item_future = item.item_future

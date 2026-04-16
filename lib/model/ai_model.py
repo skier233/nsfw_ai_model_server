@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", message=".*buffer is not writable.*", category
 
 DEFAULT_MODEL_CAPABILITY = "tagging"
 DEFAULT_SUPPORTED_TARGET_SCOPES = ["asset", "frame", "region"]
-VALID_MODEL_CAPABILITIES = {"tagging", "detection", "embedding"}
+VALID_MODEL_CAPABILITIES = {"tagging", "detection", "embedding", "classification"}
 VALID_TARGET_SCOPES = {"asset", "frame", "region"}
 
 class AIModel(Model):
@@ -35,7 +35,12 @@ class AIModel(Model):
     def __init__(self, configValues, keep_on_device=False):
         Model.__init__(self, configValues)
         self.max_model_batch_size = configValues.get("max_model_batch_size", 12)
+        # Immutable copy of the config cap — stored before update_batch_with_mutli_models
+        # can overwrite max_model_batch_size via the legacy bspv path.
+        # compute_batch_sizes reads this field for per-model caps.
+        self._config_max_batch_cap = configValues.get("max_model_batch_size", None)
         self.batch_size_per_VRAM_GB = configValues.get("batch_size_per_VRAM_GB", None)
+        self.activation_per_item_mb = configValues.get("activation_per_item_mb", None)
         self.model_file_name = configValues.get("model_file_name", None)
         self.model_license_name = configValues.get("model_license_name", None)
         self.device = configValues.get("device", None)
@@ -49,6 +54,12 @@ class AIModel(Model):
         self.normalization_config = configValues.get("normalization_config", 1)
         self.model_capabilities = _resolve_model_capabilities(configValues, self.model_type)
         self.supported_target_scopes = _resolve_supported_target_scopes(configValues)
+        # Explicit opt-in/opt-out for full_image_models: ALL resolution.
+        # None = use default heuristic (tagging/embedding → included).
+        self.full_image_model = configValues.get("full_image_model", None)
+        # Optional override for VRAM budget weight estimation (MB).
+        # If not set, weight is estimated from the model file size on disk.
+        self._model_weight_mb_override = configValues.get("model_weight_mb", None)
         if self.model_file_name is None:
             raise ValueError("model_file_name is required for AI models")
         self.model = None
@@ -145,6 +156,8 @@ def _resolve_model_capabilities(config_values, model_type: str) -> List[str]:
         return ["embedding"]
     if "detect" in model_type_normalized:
         return ["detection"]
+    if "classif" in model_type_normalized:
+        return ["classification"]
     return [DEFAULT_MODEL_CAPABILITY]
 
 
