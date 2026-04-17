@@ -1,5 +1,4 @@
 
-import asyncio
 import time
 
 import numpy as np
@@ -22,13 +21,10 @@ class AIFaceDetectionModel(AIModel):
 
     async def worker_function(self, data):
         batch_started_at = time.time()
-        loop = asyncio.get_running_loop()
         for item in data:
             item_future = item.item_future
             try:
-                detections = await loop.run_in_executor(
-                    None, self._run_detection_item, item,
-                )
+                detections = self._run_detection_item(item)
                 await item_future.set_data(item.output_names[0], detections)
             except Exception as e:
                 self.logger.error(f"Error in AIFaceDetectionModel: {e}")

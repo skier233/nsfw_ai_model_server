@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import numpy as np
 import torch
 from lib.async_lib.async_processing import ItemFuture
-from lib.model.preprocessing_python.image_preprocessing import get_video_duration_deffcode
+from lib.model.preprocessing_python.image_preprocessing import get_video_duration_av
 from lib.model.postprocessing.AI_VideoResult import AIVideoResult, AIVideoResultV3
 import lib.model.postprocessing.timeframe_processing as timeframe_processing
 from lib.model.postprocessing.category_settings import category_config
@@ -139,7 +139,7 @@ async def _join_child_futures(parent_future, child_futures, output_name):
 async def video_result_postprocessor(data):
     for item in data:
         itemFuture = item.item_future
-        duration = get_video_duration_deffcode(itemFuture[item.input_names[1]])
+        duration = get_video_duration_av(itemFuture[item.input_names[1]])
         result = {"frames": itemFuture[item.input_names[0]], "video_duration": duration, "frame_interval": float(itemFuture[item.input_names[2]]), "threshold": float(itemFuture[item.input_names[3]]), "ai_models_info": itemFuture['pipeline'].get_ai_models_info()}
         del itemFuture.data["pipeline"]
 
@@ -156,7 +156,7 @@ async def video_result_postprocessor(data):
 async def video_result_postprocessor_v3(data):
     for item in data:
         itemFuture = item.item_future
-        duration = get_video_duration_deffcode(itemFuture[item.input_names[1]])
+        duration = get_video_duration_av(itemFuture[item.input_names[1]])
         pipeline = itemFuture['pipeline']
         currently_active_models = pipeline.get_ai_models_info()
 

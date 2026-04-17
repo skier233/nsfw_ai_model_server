@@ -16,7 +16,7 @@ from torchvision.transforms.functional import pil_to_tensor
 from torchvision.io import decode_image, ImageReadMode
 import torchvision
 import numpy as np
-from deffcode import Sourcer
+#from deffcode import Sourcer
 
 from lib.pipeline.preprocess_spec import NORMALIZATION_PRESETS
 
@@ -261,6 +261,20 @@ def get_video_duration_torchvision(video_path):
     metadata = video.get_metadata()
     duration = metadata['video']['duration'][0]
     return duration
+
+def get_video_duration_av(video_path):
+    import av
+    video_path = _validate_local_video_source(video_path)
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        if stream.duration and stream.time_base:
+            return float(stream.duration * stream.time_base)
+        if container.duration:
+            return container.duration / av.time_base
+        # Fall back to frame-count / frame-rate
+        fps = float(stream.average_rate) if stream.average_rate else 30.0
+        frames = stream.frames
+        return (frames / fps) if fps and frames else 0.0
 
 def get_video_duration_deffcode(video_path):
 

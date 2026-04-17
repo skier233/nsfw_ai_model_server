@@ -130,10 +130,19 @@ def compute_batch_sizes(ai_models, device_str, max_pending_frames=0,
     total_weights_mb = sum(weight_estimates.values())
 
     # ── 2. Preprocessed frame/image storage on GPU ──────────────────────
+    # NOTE: The video preprocessor keeps all pending frames on CPU
+    # (producer thread forces device="cpu" on specs).  Frames are only
+    # moved to GPU inside the model's batched inference call, so the GPU
+    # memory for queued tensors is bounded by queue depth, not
+    # max_pending_frames.  For single-image requests there is still 1 set
+    # on GPU.  We reserve space for a small number of in-flight sets
+    # (enough to cover model queue depth) rather than all pending frames.
     gpu_specs = _collect_gpu_preprocess_specs(ai_models)
     per_frame_mb = sum(_estimate_preprocess_tensor_mb(size, hp)
                        for size, hp in gpu_specs)
-    queued_sets = max(max_pending_frames, 1)
+    # In-flight on GPU: at most ~1 batch per model being processed +
+    # a few queued.  Use a fixed reasonable estimate (e.g. 64 sets).
+    queued_sets = min(max(max_pending_frames, 1), 64)
     preprocess_storage_mb = per_frame_mb * queued_sets
 
     # ── 3. Available VRAM for batch activations ─────────────────────────
@@ -156,7 +165,9 @@ def compute_batch_sizes(ai_models, device_str, max_pending_frames=0,
 
     # ── 4. Compute per-model raw batch sizes ────────────────────────────
     # Only models with calibrated activation_per_item_mb are dynamically
-    # scaled. batch_size_per_VRAM_GB is deprecated and ignored here.
+    # scaled.  Models using the legacy batch_size_per_VRAM_GB path
+    # (without activation_per_item_mb) are left at the values already
+    # set by update_batch_with_mutli_models.
     raw_batches = {}  # model id → raw batch size
     dynamic_models = []
 
@@ -221,8 +232,5 @@ def compute_batch_sizes(ai_models, device_str, max_pending_frames=0,
 
         model.max_model_batch_size = batch_size
         model.max_batch_size = batch_size
-        # Queue holds several batches so the preprocessor can stay ahead
-        # of GPU inference.  This prevents the ping-pong pattern where
-        # the consumer fills one batch, blocks, waits for GPU, refills.
-        model.max_queue_size = batch_size * 3
+        model.max_queue_size = batch_size * 4
 

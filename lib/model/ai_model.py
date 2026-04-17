@@ -77,7 +77,7 @@ class AIModel(Model):
         self.update_batch_with_mutli_models(1)
     
     def update_batch_with_mutli_models(self, model_count):
-        batch_multipliers = [1.0, 0.7, 0.6, 0.52, 0.45, 0.4, 0.3]
+        batch_multipliers = [1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
         if self.batch_size_per_VRAM_GB is not None and (torch.cuda.is_available() or torch.xpu.is_available()):
             batch_size_temp = self.batch_size_per_VRAM_GB * batch_multipliers[model_count - 1]
             if self.device == "cuda":
@@ -87,9 +87,7 @@ class AIModel(Model):
             scaledBatchSize = custom_round(batch_size_temp * gpuMemory)
             self.max_model_batch_size = scaledBatchSize
             self.max_batch_size = scaledBatchSize
-            # Allow the queue to hold several batches so the preprocessor
-            # can stay ahead of GPU inference instead of ping-ponging.
-            self.max_queue_size = scaledBatchSize * 3
+            self.max_queue_size = scaledBatchSize * 4
             self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name} ({self.model_category})")
 
     async def load(self):

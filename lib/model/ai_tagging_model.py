@@ -1,5 +1,4 @@
 
-import asyncio
 import time
 import torch
 from lib.model.ai_model import AIModel
@@ -25,27 +24,13 @@ class AITaggingModel(AIModel):
             if self.model is None:
                 raise RuntimeError(f"Failed to initialize model runner for {self.model_file_name}")
 
-            # ---------- GPU-heavy work: offloaded to thread ----------
-            # torch.stack, .to(device), and model inference block the
-            # event loop for hundreds of ms.  Running them in a thread
-            # lets the event loop continue dispatching preprocessed
-            # frames to model queues while the GPU is busy.
-            loop = asyncio.get_running_loop()
-
-            def _gpu_inference():
-                resized_images = []
-                for item in data:
-                    resized_images.append(item.item_future[item.input_names[0]])
-                images = torch.stack(resized_images, dim=0).to(self.localdevice)
-                curr = time.time()
-                results = self.model.process_images(images)
-                elapsed = time.time() - curr
-                return results, elapsed
-
-            results, elapsed = await loop.run_in_executor(None, _gpu_inference)
-            self.logger.debug(f"Processed {len(data)} images in {elapsed} in {self.model_file_name} ({self.model_category})")
-
-            # ---------- Result dispatch: stays on event loop ----------
+            resized_images = []
+            for item in data:
+                resized_images.append(item.item_future[item.input_names[0]])
+            images = torch.stack(resized_images, dim=0).to(self.localdevice)
+            curr = time.time()
+            results = self.model.process_images(images)
+            self.logger.debug(f"Processed {len(data)} images in {time.time() - curr} in {self.model_file_name} ({self.model_category})")
             for i, item in enumerate(data):
                 item_future = item.item_future
                 threshold = item_future[item.input_names[1]] or self.model_threshold

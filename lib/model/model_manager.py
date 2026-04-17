@@ -62,6 +62,7 @@ class ModelManager:
             case "model":
                 model_processor = ModelProcessor(AITaggingModel(model_config))
                 self.ai_models.append(model_processor)
+                self._rescale_legacy_batch_sizes()
                 return model_processor
             case "face_torch_export":
                 role = str(model_config.get("face_model_role", "detection")).lower()
@@ -70,25 +71,42 @@ class ModelManager:
                 else:
                     model_processor = ModelProcessor(AIFaceDetectionModel(model_config))
                 self.ai_models.append(model_processor)
+                self._rescale_legacy_batch_sizes()
                 return model_processor
             case "python":
                 return ModelProcessor(PythonModel(model_config))
             case "visual_embedding":
                 model_processor = ModelProcessor(AIVisualEmbeddingModel(model_config))
                 self.ai_models.append(model_processor)
+                self._rescale_legacy_batch_sizes()
                 return model_processor
             case "audio_embedding":
                 model_processor = ModelProcessor(AIAudioEmbeddingModel(model_config))
                 self.ai_models.append(model_processor)
+                self._rescale_legacy_batch_sizes()
                 return model_processor
             case "audio_classifier":
                 model_processor = ModelProcessor(AIAudioClassifierModel(model_config))
                 self.ai_models.append(model_processor)
+                self._rescale_legacy_batch_sizes()
                 return model_processor
             case "audio_preprocessor":
                 return ModelProcessor(AudioPreprocessorModel(model_config))
             case _:
                 raise ValueError(f"Model type {model_config['type']} not recognized!")
+
+    def _rescale_legacy_batch_sizes(self):
+        """Re-apply legacy batch_size_per_VRAM_GB scaling for all AI models.
+
+        Called after each new AI model is added so that models sharing the GPU
+        get progressively smaller batches as more models are loaded — matching
+        the original master logic.
+        """
+        model_count = len(self.ai_models)
+        if model_count > 1:
+            for mp in self.ai_models:
+                mp.model.update_batch_with_mutli_models(model_count)
+                mp.update_values_from_child_model()
 
     def compute_vram_batch_sizes(self):
         """Recompute batch sizes for all AI models using VRAM budget allocation.

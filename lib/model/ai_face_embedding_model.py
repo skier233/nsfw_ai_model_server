@@ -1,5 +1,4 @@
 
-import asyncio
 import time
 
 import numpy as np
@@ -31,13 +30,10 @@ class AIFaceEmbeddingModel(AIModel):
 
     async def worker_function(self, data):
         batch_started_at = time.time()
-        loop = asyncio.get_running_loop()
         for item in data:
             item_future = item.item_future
             try:
-                embedding = await loop.run_in_executor(
-                    None, self._run_embedding_item, item,
-                )
+                embedding = self._run_embedding_item(item)
                 await item_future.set_data(item.output_names[0], embedding)
             except Exception as e:
                 self.logger.error(f"Error in AIFaceEmbeddingModel: {e}")

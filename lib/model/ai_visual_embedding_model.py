@@ -1,4 +1,3 @@
-import asyncio
 import time
 import numpy as np
 import torch
@@ -44,11 +43,7 @@ class AIVisualEmbeddingModel(AIModel):
         if not tensors:
             return
 
-        # Batch inference — offloaded to thread so event loop stays
-        # free for frame dispatch while the GPU is busy.
-        loop = asyncio.get_running_loop()
-
-        def _gpu_inference():
+        try:
             batch = torch.stack(tensors, dim=0).to(self.device)
             if batch.dtype != torch.float16:
                 batch = batch.half()
@@ -60,10 +55,6 @@ class AIVisualEmbeddingModel(AIModel):
                 norms = np.linalg.norm(embeddings, axis=-1, keepdims=True)
                 norms = np.maximum(norms, 1e-8)
                 embeddings = embeddings / norms
-            return embeddings
-
-        try:
-            embeddings = await loop.run_in_executor(None, _gpu_inference)
 
             for i, item in enumerate(valid_items):
                 embedding = embeddings[i]

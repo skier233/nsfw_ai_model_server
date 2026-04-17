@@ -66,6 +66,10 @@ class VideoPreprocessorModel(Model):
             self._preprocess_backend = "av_seek"
             self._preprocess_callable = preprocess_video_av_seek
             self.logger.info("Video preprocessor using PyAV seek backend")
+        elif requested_backend == "av_auto":
+            self._preprocess_backend = "av_auto"
+            self._preprocess_callable = preprocess_video_av_seek  # default; overridden per-request
+            self.logger.info("Video preprocessor using PyAV auto backend (seek when interval >= 1s, threaded otherwise)")
         elif requested_backend == "deffcode_gpu":
             if not torch.cuda.is_available():
                 self.logger.warning(
@@ -110,6 +114,16 @@ class VideoPreprocessorModel(Model):
                 frame_count = 0
                 preprocess_callable = self._preprocess_callable
                 backend_used = self._preprocess_backend
+
+                # av_auto: pick seek vs threaded based on frame_interval
+                if backend_used == "av_auto":
+                    if frame_interval < 1.0:
+                        preprocess_callable = preprocess_video_av
+                        backend_used = "av"
+                    else:
+                        preprocess_callable = preprocess_video_av_seek
+                        backend_used = "av_seek"
+
                 # Determine the max decode resolution from the specs.
                 # If every spec has a finite cap we can let ffmpeg downscale
                 # at decode time → dramatically less per-frame data.
@@ -193,12 +207,6 @@ class VideoPreprocessorModel(Model):
                 _result_q = queue.Queue(maxsize=_QUEUE_DEPTH)
                 _producer_error = []
                 _cumulative_cpu = [0.0]   # mutable float for thread
-                _timing = {
-                    "decode_wait": 0.0,   # time blocked on next(frame_iterator)
-                    "apply_spec": 0.0,    # time in apply_spec
-                    "queue_put": 0.0,     # time blocked on queue.put
-                    "frames": 0,
-                }
 
                 def _frame_producer():
                     # Build CPU-only variants of specs so that apply_spec
@@ -214,16 +222,12 @@ class VideoPreprocessorModel(Model):
                     ]
                     _out_names = item.output_names
                     _ss = spec_start
-                    _t = _timing
                     try:
                         while True:
-                            t_dec_start = time.perf_counter()
                             try:
                                 frame_data = next(frame_iterator)
                             except StopIteration:
                                 break
-                            t_dec_end = time.perf_counter()
-                            _t["decode_wait"] += t_dec_end - t_dec_start
 
                             frame_index = frame_data[0]
                             raw_frame = frame_data[1]
@@ -234,17 +238,9 @@ class VideoPreprocessorModel(Model):
                             for i, sp in enumerate(_specs):
                                 st[_out_names[_ss + i]] = apply_spec(raw_frame, sp)
                             del raw_frame
-                            t1 = time.perf_counter()
+                            _cumulative_cpu[0] += time.perf_counter() - t0
 
                             _result_q.put((frame_index, st))
-                            t2 = time.perf_counter()
-
-                            _t["apply_spec"] += t1 - t0
-                            _t["queue_put"] += t2 - t1
-                            _t["frames"] += 1
-
-                            # Mark the start of the next decode wait
-                            _cumulative_cpu[0] += t1 - t0
                     except Exception as exc:
                         _producer_error.append(exc)
                     finally:
@@ -257,19 +253,10 @@ class VideoPreprocessorModel(Model):
                 producer.start()
 
                 try:
-                    # Pull frames from the producer in batches to reduce
-                    # thread-pool round-trips (1 call per batch of frames
-                    # instead of 1 call per frame).
                     _threshold = itemFuture[item.input_names[3]]
                     _return_conf = itemFuture[item.input_names[4]]
                     _skipped_cats = itemFuture[item.input_names[6]]
                     _out_names = item.output_names
-                    _consumer_timing = {
-                        "pull_wait": 0.0,     # time blocked waiting for producer
-                        "create_futures": 0.0, # time creating ItemFutures
-                        "pulls": 0,
-                        "pull_sizes": [],
-                    }
 
                     def _pull_batch():
                         """Block for the first item, then drain non-blocking."""
@@ -277,7 +264,6 @@ class VideoPreprocessorModel(Model):
                         if first is _FRAME_DONE:
                             return [first]
                         items = [first]
-                        # Drain up to 63 more without blocking
                         while len(items) < 64:
                             try:
                                 nxt = _result_q.get_nowait()
@@ -289,15 +275,9 @@ class VideoPreprocessorModel(Model):
                         return items
 
                     while True:
-                        t_pull_start = time.perf_counter()
                         batch = await loop.run_in_executor(None, _pull_batch)
-                        t_pull_end = time.perf_counter()
-                        _consumer_timing["pull_wait"] += t_pull_end - t_pull_start
-                        _consumer_timing["pulls"] += 1
-                        _consumer_timing["pull_sizes"].append(len(batch))
 
                         hit_done = False
-                        t_create_start = time.perf_counter()
                         for result in batch:
                             if result is _FRAME_DONE:
                                 hit_done = True
@@ -319,7 +299,6 @@ class VideoPreprocessorModel(Model):
                             if frame_semaphore is not None:
                                 child.future.add_done_callback(lambda _, s=frame_semaphore: s.release())
                             children.append(child)
-                        _consumer_timing["create_futures"] += time.perf_counter() - t_create_start
 
                         if hit_done:
                             if _producer_error:
@@ -327,21 +306,7 @@ class VideoPreprocessorModel(Model):
                             break
 
                     preprocess_time = _cumulative_cpu[0]
-                    # --- Timing summary ---
                     producer.join(timeout=10.0)
-                    _t = _timing
-                    _ct = _consumer_timing
-                    avg_pull = sum(_ct["pull_sizes"]) / max(len(_ct["pull_sizes"]), 1)
-                    self.logger.warning(
-                        "PIPELINE TIMING [%d frames] — "
-                        "Producer: decode_wait=%.2fs, apply_spec=%.2fs, queue_put=%.2fs | "
-                        "Consumer: pull_wait=%.2fs, create_futures=%.2fs, pulls=%d, avg_pull_size=%.1f | "
-                        "Total producer=%.2fs",
-                        _t["frames"],
-                        _t["decode_wait"], _t["apply_spec"], _t["queue_put"],
-                        _ct["pull_wait"], _ct["create_futures"], _ct["pulls"], avg_pull,
-                        _t["decode_wait"] + _t["apply_spec"] + _t["queue_put"],
-                    )
                 finally:
                     # Drain queue so the producer isn't stuck on put().
                     while producer.is_alive():
