@@ -87,7 +87,9 @@ class AIModel(Model):
             scaledBatchSize = custom_round(batch_size_temp * gpuMemory)
             self.max_model_batch_size = scaledBatchSize
             self.max_batch_size = scaledBatchSize
-            self.max_queue_size = scaledBatchSize
+            # Allow the queue to hold several batches so the preprocessor
+            # can stay ahead of GPU inference instead of ping-ponging.
+            self.max_queue_size = scaledBatchSize * 3
             self.logger.debug(f"Setting batch size to {scaledBatchSize} based on VRAM size of {gpuMemory} GB for model {self.model_file_name} ({self.model_category})")
 
     async def load(self):

@@ -221,5 +221,8 @@ def compute_batch_sizes(ai_models, device_str, max_pending_frames=0,
 
         model.max_model_batch_size = batch_size
         model.max_batch_size = batch_size
-        model.max_queue_size = batch_size
+        # Queue holds several batches so the preprocessor can stay ahead
+        # of GPU inference.  This prevents the ping-pong pattern where
+        # the consumer fills one batch, blocks, waits for GPU, refills.
+        model.max_queue_size = batch_size * 3
 

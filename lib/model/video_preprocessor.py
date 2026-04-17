@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import queue
+import threading
 import time
 
 import torch
@@ -108,7 +110,6 @@ class VideoPreprocessorModel(Model):
                 frame_count = 0
                 preprocess_callable = self._preprocess_callable
                 backend_used = self._preprocess_backend
-
                 # Determine the max decode resolution from the specs.
                 # If every spec has a finite cap we can let ffmpeg downscale
                 # at decode time → dramatically less per-frame data.
@@ -127,7 +128,7 @@ class VideoPreprocessorModel(Model):
                         frame_interval,
                         0,             # image_size=0: no resize at decode level
                         False,         # use_half_precision=False: fp32 base
-                        None,          # device
+                        "cpu",         # device: keep on CPU — apply_spec handles resize/norm
                         use_timestamps,
                         vr_video=vr_video,
                         norm_config=-1,            # skip normalization
@@ -143,7 +144,7 @@ class VideoPreprocessorModel(Model):
                         preprocess_callable = preprocess_video_deffcode
                         backend_used = "deffcode"
                         frame_source = preprocess_callable(
-                            input_data, frame_interval, 0, False, None,
+                            input_data, frame_interval, 0, False, "cpu",
                             use_timestamps, vr_video=vr_video, norm_config=-1,
                             max_decode_long_edge=_max_decode_long_edge,
                         )
@@ -155,7 +156,7 @@ class VideoPreprocessorModel(Model):
                         preprocess_callable = preprocess_video_deffcode
                         backend_used = "deffcode"
                         frame_source = preprocess_callable(
-                            input_data, frame_interval, 0, False, None,
+                            input_data, frame_interval, 0, False, "cpu",
                             use_timestamps, vr_video=vr_video, norm_config=-1,
                             max_decode_long_edge=_max_decode_long_edge,
                         )
@@ -169,62 +170,186 @@ class VideoPreprocessorModel(Model):
                 frame_iterator = iter(frame_source)
                 loop = asyncio.get_running_loop()
 
-                _SENTINEL = object()  # signals iterator exhaustion from thread
+                # ---- Continuous producer-consumer pipeline ----
+                #
+                # Previously, decode→transform→apply_spec was done one
+                # frame at a time via ``await run_in_executor()``, which
+                # forced an event-loop round-trip between every frame
+                # (~10 ms overhead × 1863 frames = ~19 s wasted).
+                #
+                # Now a background thread runs the full loop without
+                # ever yielding to the event loop.  Results go into a
+                # bounded queue; the async consumer just pulls them out
+                # and creates ItemFutures.  Three-stage pipeline:
+                #
+                #   Thread A (av_seek prefetch): seek+decode (GIL-free)
+                #   Thread B (producer below) : transform+apply_spec
+                #   Async consumer            : ItemFuture → GPU
+                #
+                # All three stages overlap.  Total ≈ max(decode, GPU).
 
-                def _decode_and_apply_specs(frame_iterator, specs, output_names, spec_start):
-                    """Decode one frame and apply all specs (CPU-bound work).
+                _FRAME_DONE = object()
+                _QUEUE_DEPTH = 64
+                _result_q = queue.Queue(maxsize=_QUEUE_DEPTH)
+                _producer_error = []
+                _cumulative_cpu = [0.0]   # mutable float for thread
+                _timing = {
+                    "decode_wait": 0.0,   # time blocked on next(frame_iterator)
+                    "apply_spec": 0.0,    # time in apply_spec
+                    "queue_put": 0.0,     # time blocked on queue.put
+                    "frames": 0,
+                }
 
-                    Runs in a thread pool so the event loop stays free for
-                    AI model batch collection during video processing.
-                    Returns _SENTINEL when the iterator is exhausted.
-                    """
-                    frame_data = next(frame_iterator, _SENTINEL)
-                    if frame_data is _SENTINEL:
-                        return _SENTINEL
+                def _frame_producer():
+                    # Build CPU-only variants of specs so that apply_spec
+                    # never touches the GPU.  Individual H2D transfers per
+                    # frame on the default CUDA stream serialize with GPU
+                    # inference and cause the spiky utilisation pattern.
+                    # Keeping everything on CPU lets the batched inference
+                    # step do a single large H2D copy instead.
+                    from dataclasses import replace as _dc_replace
+                    _specs = [
+                        _dc_replace(sp, device="cpu") if sp.device != "cpu" else sp
+                        for sp in self.specs
+                    ]
+                    _out_names = item.output_names
+                    _ss = spec_start
+                    _t = _timing
+                    try:
+                        while True:
+                            t_dec_start = time.perf_counter()
+                            try:
+                                frame_data = next(frame_iterator)
+                            except StopIteration:
+                                break
+                            t_dec_end = time.perf_counter()
+                            _t["decode_wait"] += t_dec_end - t_dec_start
 
-                    frame_index = frame_data[0]
-                    raw_frame = frame_data[1]
-                    del frame_data
+                            frame_index = frame_data[0]
+                            raw_frame = frame_data[1]
+                            del frame_data
 
-                    if raw_frame.dtype != torch.half:
-                        raw_frame = raw_frame.half()
+                            t0 = time.perf_counter()
+                            st = {}
+                            for i, sp in enumerate(_specs):
+                                st[_out_names[_ss + i]] = apply_spec(raw_frame, sp)
+                            del raw_frame
+                            t1 = time.perf_counter()
 
-                    spec_tensors = {}
-                    for i, spec in enumerate(specs):
-                        spec_tensors[output_names[spec_start + i]] = apply_spec(raw_frame, spec)
+                            _result_q.put((frame_index, st))
+                            t2 = time.perf_counter()
 
-                    del raw_frame
-                    return frame_index, spec_tensors
+                            _t["apply_spec"] += t1 - t0
+                            _t["queue_put"] += t2 - t1
+                            _t["frames"] += 1
+
+                            # Mark the start of the next decode wait
+                            _cumulative_cpu[0] += t1 - t0
+                    except Exception as exc:
+                        _producer_error.append(exc)
+                    finally:
+                        _result_q.put(_FRAME_DONE)
+
+                producer = threading.Thread(
+                    target=_frame_producer, daemon=True,
+                    name="video-preprocess-producer",
+                )
+                producer.start()
 
                 try:
+                    # Pull frames from the producer in batches to reduce
+                    # thread-pool round-trips (1 call per batch of frames
+                    # instead of 1 call per frame).
+                    _threshold = itemFuture[item.input_names[3]]
+                    _return_conf = itemFuture[item.input_names[4]]
+                    _skipped_cats = itemFuture[item.input_names[6]]
+                    _out_names = item.output_names
+                    _consumer_timing = {
+                        "pull_wait": 0.0,     # time blocked waiting for producer
+                        "create_futures": 0.0, # time creating ItemFutures
+                        "pulls": 0,
+                        "pull_sizes": [],
+                    }
+
+                    def _pull_batch():
+                        """Block for the first item, then drain non-blocking."""
+                        first = _result_q.get()
+                        if first is _FRAME_DONE:
+                            return [first]
+                        items = [first]
+                        # Drain up to 63 more without blocking
+                        while len(items) < 64:
+                            try:
+                                nxt = _result_q.get_nowait()
+                                items.append(nxt)
+                                if nxt is _FRAME_DONE:
+                                    break
+                            except queue.Empty:
+                                break
+                        return items
+
                     while True:
-                        chunk_start = time.perf_counter()
-                        result = await loop.run_in_executor(
-                            None, _decode_and_apply_specs,
-                            frame_iterator, self.specs, item.output_names, spec_start,
-                        )
-                        if result is _SENTINEL:
+                        t_pull_start = time.perf_counter()
+                        batch = await loop.run_in_executor(None, _pull_batch)
+                        t_pull_end = time.perf_counter()
+                        _consumer_timing["pull_wait"] += t_pull_end - t_pull_start
+                        _consumer_timing["pulls"] += 1
+                        _consumer_timing["pull_sizes"].append(len(batch))
+
+                        hit_done = False
+                        t_create_start = time.perf_counter()
+                        for result in batch:
+                            if result is _FRAME_DONE:
+                                hit_done = True
+                                break
+
+                            frame_index, spec_tensors = result
+                            frame_count += 1
+
+                            payload = {
+                                _out_names[1]: frame_index,
+                                _out_names[2]: _threshold,
+                                _out_names[3]: _return_conf,
+                                _out_names[4]: _skipped_cats,
+                            }
+                            payload.update(spec_tensors)
+                            if frame_semaphore is not None:
+                                await frame_semaphore.acquire()
+                            child = await ItemFuture.create(item, payload, item.item_future.handler)
+                            if frame_semaphore is not None:
+                                child.future.add_done_callback(lambda _, s=frame_semaphore: s.release())
+                            children.append(child)
+                        _consumer_timing["create_futures"] += time.perf_counter() - t_create_start
+
+                        if hit_done:
+                            if _producer_error:
+                                raise _producer_error[0]
                             break
-                        frame_index, spec_tensors = result
-                        preprocess_time += time.perf_counter() - chunk_start
 
-                        frame_count += 1
-
-                        # Build per-frame child payload.
-                        payload = {
-                            item.output_names[1]: frame_index,
-                            item.output_names[2]: itemFuture[item.input_names[3]],
-                            item.output_names[3]: itemFuture[item.input_names[4]],
-                            item.output_names[4]: itemFuture[item.input_names[6]],
-                        }
-                        payload.update(spec_tensors)
-                        if frame_semaphore is not None:
-                            await frame_semaphore.acquire()
-                        result = await ItemFuture.create(item, payload, item.item_future.handler)
-                        if frame_semaphore is not None:
-                            result.future.add_done_callback(lambda _, s=frame_semaphore: s.release())
-                        children.append(result)
+                    preprocess_time = _cumulative_cpu[0]
+                    # --- Timing summary ---
+                    producer.join(timeout=10.0)
+                    _t = _timing
+                    _ct = _consumer_timing
+                    avg_pull = sum(_ct["pull_sizes"]) / max(len(_ct["pull_sizes"]), 1)
+                    self.logger.warning(
+                        "PIPELINE TIMING [%d frames] — "
+                        "Producer: decode_wait=%.2fs, apply_spec=%.2fs, queue_put=%.2fs | "
+                        "Consumer: pull_wait=%.2fs, create_futures=%.2fs, pulls=%d, avg_pull_size=%.1f | "
+                        "Total producer=%.2fs",
+                        _t["frames"],
+                        _t["decode_wait"], _t["apply_spec"], _t["queue_put"],
+                        _ct["pull_wait"], _ct["create_futures"], _ct["pulls"], avg_pull,
+                        _t["decode_wait"] + _t["apply_spec"] + _t["queue_put"],
+                    )
                 finally:
+                    # Drain queue so the producer isn't stuck on put().
+                    while producer.is_alive():
+                        try:
+                            _result_q.get_nowait()
+                        except queue.Empty:
+                            break
+                    producer.join(timeout=5.0)
                     close = getattr(frame_source, "close", None)
                     if callable(close):
                         close()

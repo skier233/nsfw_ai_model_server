@@ -1,3 +1,4 @@
+import asyncio
 import time
 import numpy as np
 import torch
@@ -43,25 +44,26 @@ class AIVisualEmbeddingModel(AIModel):
         if not tensors:
             return
 
-        # Batch inference
-        try:
-            # Stack into batch [B, C, H, W]
-            batch = torch.stack(tensors, dim=0)
-            batch = batch.to(self.device)
+        # Batch inference — offloaded to thread so event loop stays
+        # free for frame dispatch while the GPU is busy.
+        loop = asyncio.get_running_loop()
+
+        def _gpu_inference():
+            batch = torch.stack(tensors, dim=0).to(self.device)
             if batch.dtype != torch.float16:
                 batch = batch.half()
-
             with torch.no_grad():
                 embeddings = self.model.run_raw(batch)
-
             if isinstance(embeddings, torch.Tensor):
                 embeddings = embeddings.cpu().numpy()
-
-            # L2 normalize if configured
             if self.l2_normalize:
                 norms = np.linalg.norm(embeddings, axis=-1, keepdims=True)
                 norms = np.maximum(norms, 1e-8)
                 embeddings = embeddings / norms
+            return embeddings
+
+        try:
+            embeddings = await loop.run_in_executor(None, _gpu_inference)
 
             for i, item in enumerate(valid_items):
                 embedding = embeddings[i]
