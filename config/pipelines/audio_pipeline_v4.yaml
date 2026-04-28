@@ -1,0 +1,22 @@
+inputs:
+  - audio_path
+  - threshold
+  - requested_model_names
+output: result
+short_name: audio_embedding_v4
+version: 4.0
+
+models:
+  - name: dynamic_audio_ai
+    inputs:
+      - audio_path
+      - threshold
+      - requested_model_names
+    outputs:
+      - childrenResults
+  - name: audio_result_postprocessor_v4
+    inputs:
+      - childrenResults
+      - audio_path
+    outputs:
+      - result

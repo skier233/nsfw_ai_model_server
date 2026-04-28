@@ -1,0 +1,25 @@
+inputs:
+  - image_path
+  - threshold
+  - return_confidence
+  - skipped_categories
+  - requested_model_names
+output: result
+short_name: dynamic_image_v4
+version: 4.0
+
+models:
+  - name: dynamic_image_ai
+    inputs:
+      - image_path
+      - threshold
+      - return_confidence
+      - skipped_categories
+      - requested_model_names
+    outputs:
+      - result_early
+  - name: image_result_postprocessor_v4
+    inputs:
+      - result_early
+    outputs:
+      - result

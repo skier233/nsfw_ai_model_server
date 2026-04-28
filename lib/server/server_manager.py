@@ -2,12 +2,15 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
-import signal
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import torch
 from lib.config.config_utils import load_config
-from lib.configurator.configure_active_ai import choose_active_models
+from lib.configurator.configure_active_ai import (
+    choose_active_models,
+    load_active_ai_config,
+    save_active_ai_config,
+)
 from lib.logging.logger import setup_logger
 from lib.pipeline.pipeline_manager import PipelineManager
 from lib.server.exceptions import NoActiveModelsException, ServerStopException
@@ -31,7 +34,7 @@ class ServerManager:
         if os.path.exists(config_path):
             config = load_config(config_path, default_config={})
         else:
-            ServerStopException(f"Main config file does not exist: {config_path}")
+            raise ServerStopException(f"Main config file does not exist: {config_path}")
         loglevel = config.get("loglevel", "INFO")
         setup_logger("logger", loglevel)
         self.logger = logging.getLogger("logger")
@@ -48,6 +51,8 @@ class ServerManager:
             self.logger.warning("There is a new version available! Please update the server using install/update.sh or install/update.ps1")
         self.config = config
         self.pipeline_manager = PipelineManager()
+        self.reload_lock = asyncio.Lock()
+        self.reloading = False
         self.default_image_pipeline = config.get("default_image_pipeline", None)
         if self.default_image_pipeline is None:
             self.logger.error("No default image pipeline found in the configuration file.")
@@ -76,7 +81,50 @@ class ServerManager:
         self.background_task = asyncio.create_task(check_inactivity())
 
     async def get_request_future(self, data, pipeline_name):
+        if self.reloading:
+            raise RuntimeError("Model pipelines are reloading")
         return await self.pipeline_manager.get_request_future(data, pipeline_name)
+
+    async def reload_active_models(self, active_ai_models=None, pinned_ai_models=None):
+        async with self.reload_lock:
+            previous_config = load_active_ai_config()
+            next_config = dict(previous_config)
+            if active_ai_models is not None:
+                next_config["active_ai_models"] = list(active_ai_models)
+            if pinned_ai_models is not None:
+                next_config["pinned_ai_models"] = list(pinned_ai_models)
+
+            pipelines = self.config["active_pipelines"]
+            self.reloading = True
+            try:
+                save_active_ai_config(next_config)
+                await self._wait_for_idle_requests(max_outstanding=1)
+                await self.pipeline_manager.stop_pipelines()
+
+                replacement_manager = PipelineManager()
+                await replacement_manager.load_pipelines(pipelines)
+                self.pipeline_manager = replacement_manager
+                self.logger.info("Reloaded active AI models successfully")
+                return next_config
+            except Exception:
+                self.logger.error("Reload failed; attempting to restore previous active AI configuration")
+                self.logger.debug("Exception details:", exc_info=True)
+                save_active_ai_config(previous_config)
+
+                replacement_manager = PipelineManager()
+                await replacement_manager.load_pipelines(pipelines)
+                self.pipeline_manager = replacement_manager
+                raise
+            finally:
+                self.reloading = False
+
+    async def _wait_for_idle_requests(self, timeout_seconds=30.0, max_outstanding=0):
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        while outstanding_requests_middleware.outstanding_requests > max_outstanding:
+            if loop.time() - started_at >= timeout_seconds:
+                raise RuntimeError("Timed out waiting for in-flight requests to complete before reload")
+            await asyncio.sleep(0.05)
     
 
 @asynccontextmanager

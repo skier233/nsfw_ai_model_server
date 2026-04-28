@@ -3,3 +3,4 @@ max_queue_size: null
 max_batch_size: 1
 instance_count: 1
 use_half_precision: true
+max_pending_images: 96             # Max preprocessed images held in memory before pausing to let GPU catch up. 0 = unlimited.
