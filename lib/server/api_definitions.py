@@ -24,8 +24,8 @@ class VideoRequestV3(BaseModel):
     categories_to_skip: List[str] = None
     frame_interval: float = None
     threshold: float = None
+    return_confidence: bool = None
     vr_video: bool = False
-    categories_to_skip: List[str] = None
 
 class ImageRequestV3(BaseModel):
     paths: List[str]

@@ -83,7 +83,7 @@ async def process_video_v3(request: VideoRequestV3):
 
         pipeline_name = "video_pipeline_dynamic_v3"
         
-        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip]
+        data = [request.path, True, request.frame_interval, request.threshold, request.return_confidence, request.vr_video, request.categories_to_skip]
 
         result = None
         try:
