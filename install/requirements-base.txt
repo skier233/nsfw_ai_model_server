@@ -6,6 +6,9 @@ PyYAML==6.0.2
 fastapi==0.112.2
 pycryptodomex==3.20.0
 uvicorn
+transformers>=4.52,<5
+tokenizers>=0.21,<1
+safetensors>=0.5,<1
 requests
 aiohttp
 colorlog

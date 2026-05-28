@@ -30,3 +30,9 @@ def load_config(file_path, default_config={}):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         return default_config
+
+
+def save_config(file_path, config):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'w', encoding='utf-8') as file:
+        yaml.safe_dump(config or {}, file, default_flow_style=False, sort_keys=False)

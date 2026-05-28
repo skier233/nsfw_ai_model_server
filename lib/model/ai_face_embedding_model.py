@@ -52,6 +52,8 @@ class AIFaceEmbeddingModel(AIModel):
         if not isinstance(tensor, torch.Tensor):
             raise ValueError("Embedding face model expects tensor input")
 
+        landmarks = _try_extract_face_landmarks(item_future)
+        pose_quality = _estimate_face_pose_quality(landmarks)
         aligned_image = self._try_aligned_face_image(item_future)
         # Eagerly release the full-resolution source tensor from this
         # child future now that alignment has been resolved.  This allows
@@ -65,6 +67,7 @@ class AIFaceEmbeddingModel(AIModel):
 
         image = image.unsqueeze(0)
         image = F.interpolate(image, size=(112, 112), mode="bilinear", align_corners=False)
+        image_quality = _estimate_face_image_quality(image)
         input_tensor = (image - 127.5) / 127.5
         input_tensor = input_tensor.to(self.device)
 
@@ -72,19 +75,18 @@ class AIFaceEmbeddingModel(AIModel):
         outputs = self.model.run_raw_multi_output(input_tensor)
         feat_np = outputs[0].reshape(-1)
         norm = float(np.linalg.norm(feat_np))
-        return [{"vector": feat_np.tolist(), "norm": norm, "embedder": self.model_file_name}]
+        result = {"vector": feat_np.tolist(), "norm": norm, "embedder": self.model_file_name}
+        if pose_quality is not None:
+            result["pose_quality"] = round(float(pose_quality), 6)
+        if image_quality is not None:
+            result["image_quality"] = round(float(image_quality), 6)
+        return [result]
 
     def _try_aligned_face_image(self, item_future):
         try:
-            region_target = _resolve_future_key(item_future, "dynamic_region_target")
             source_tensor = _resolve_future_key(item_future, "dynamic_region_source")
-            if not isinstance(region_target, dict) or not isinstance(source_tensor, torch.Tensor):
-                return None
-
-            metadata = region_target.get("metadata") or {}
-            kps = metadata.get("kps")
-            kps = _normalize_kps(kps)
-            if kps is None:
+            kps = _try_extract_face_landmarks(item_future)
+            if not isinstance(source_tensor, torch.Tensor) or kps is None:
                 return None
 
             return _norm_crop_gpu(source_tensor, kps, image_size=112)
@@ -134,6 +136,15 @@ def _resolve_future_key(item_future, prefix):
     return None
 
 
+def _try_extract_face_landmarks(item_future):
+    region_target = _resolve_future_key(item_future, "dynamic_region_target")
+    if not isinstance(region_target, dict):
+        return None
+
+    metadata = region_target.get("metadata") or {}
+    return _normalize_kps(metadata.get("kps"))
+
+
 def _normalize_kps(kps):
     if kps is None:
         return None
@@ -141,6 +152,63 @@ def _normalize_kps(kps):
     if arr.shape != (5, 2):
         return None
     return arr
+
+
+def _estimate_face_pose_quality(landmark: np.ndarray | None):
+    if landmark is None or landmark.shape != (5, 2):
+        return None
+
+    left_eye, right_eye, nose, left_mouth, right_mouth = landmark.astype(np.float32)
+    eye_center = (left_eye + right_eye) * 0.5
+    mouth_center = (left_mouth + right_mouth) * 0.5
+    face_axis = mouth_center - eye_center
+
+    axis_norm = float(np.linalg.norm(face_axis))
+    eye_span = float(np.linalg.norm(right_eye - left_eye))
+    mouth_span = float(np.linalg.norm(right_mouth - left_mouth))
+    face_scale = max(axis_norm, eye_span, mouth_span, 1e-6)
+    if eye_span <= 1e-6 or mouth_span <= 1e-6 or axis_norm <= 1e-6:
+        return 0.0
+
+    nose_eye_left = float(np.linalg.norm(nose - left_eye))
+    nose_eye_right = float(np.linalg.norm(nose - right_eye))
+    nose_mouth_left = float(np.linalg.norm(nose - left_mouth))
+    nose_mouth_right = float(np.linalg.norm(nose - right_mouth))
+
+    eye_balance = min(nose_eye_left, nose_eye_right) / max(nose_eye_left, nose_eye_right, 1e-6)
+    mouth_balance = min(nose_mouth_left, nose_mouth_right) / max(nose_mouth_left, nose_mouth_right, 1e-6)
+
+    side_axis = np.asarray([-face_axis[1], face_axis[0]], dtype=np.float32) / axis_norm
+    facial_midpoint = (eye_center + mouth_center) * 0.5
+    nose_side_offset = abs(float(np.dot(nose - facial_midpoint, side_axis))) / face_scale
+    center_score = max(0.0, 1.0 - (nose_side_offset / 0.35))
+
+    pose_quality = (0.45 * eye_balance) + (0.45 * mouth_balance) + (0.10 * center_score)
+    return max(0.0, min(1.0, pose_quality))
+
+
+def _estimate_face_image_quality(image: torch.Tensor | None):
+    if image is None:
+        return None
+
+    tensor = image.detach()
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.dim() != 4 or tensor.shape[1] <= 0:
+        return None
+
+    grayscale = tensor.float().mean(dim=1, keepdim=True)
+    kernel = torch.tensor(
+        [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]],
+        dtype=grayscale.dtype,
+        device=grayscale.device,
+    ).view(1, 1, 3, 3)
+    laplacian = F.conv2d(grayscale, kernel, padding=1)
+    variance = float(laplacian.var(unbiased=False).item())
+    if variance <= 0.0:
+        return 0.0
+
+    return variance / (variance + 600.0)
 
 
 def _estimate_face_embedder_affine(landmark: np.ndarray, image_size: int = 112):

@@ -2,8 +2,8 @@
 
 Extracts audio, optionally separates vocals (Demucs), runs energy VAD to
 find vocal regions, then spawns one child ItemFuture per overlapping window.
-Each child carries preprocessed tensors (fbank for ECAPA-TDNN, mel-spectrogram
-for AST) and flows through the per-window AI model DAG independently.
+Each child carries preprocessed tensors (filterbank for the embedding model,
+mel-spectrogram for the classifier) and flows through the per-window AI model DAG independently.
 
 Pipeline:
   1. ffmpeg        → extract WAV (16 kHz mono)
@@ -11,7 +11,7 @@ Pipeline:
   3. Energy VAD    → detect vocal regions in the vocal stem
   4. Windowing     → 4 s windows, 2 s hop, energy-floor filtering
   5. Per window    → compute spec tensors (fbank, mel-spectrogram)
-  6. Spawn child   → one ItemFuture per window, picked up by ECAPA / AST batchers
+    6. Spawn child   → one ItemFuture per window, picked up by the audio model batchers
 
 After all children complete, batch_awaiter collects results and the
 audio_result_postprocessor performs semantic filtering, type-binning,
@@ -331,7 +331,7 @@ def _waveform_to_fbank(
 ) -> torch.Tensor:
     """Convert waveform [1, T] to Fbank features [1, num_frames, n_mels].
 
-    Reproduces the SpeechBrain Fbank pipeline used to train ECAPA-TDNN:
+    Reproduces the reference filterbank pipeline used to train the audio embedding model:
     400-sample window, 160-sample hop, 80 mel filterbank channels.
 
     SpeechBrain's pipeline:

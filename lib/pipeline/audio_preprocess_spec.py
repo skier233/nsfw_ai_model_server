@@ -19,11 +19,11 @@ class AudioPreprocessSpec:
     device: str = "gpu"
     half_precision: bool = False
 
-    # Fbank mode (ECAPA-TDNN, etc.) — SpeechBrain-style Fbank features.
+    # Filterbank mode for audio embedding models.
     use_fbank: bool = False
     n_fbank: int = 80                   # Number of filterbank channels.
 
-    # Mel-spectrogram mode (AST, BEATs, etc.)
+    # Mel-spectrogram mode for audio classification models.
     use_mel_spectrogram: bool = False
     n_mels: int = 128
     target_length: int = 1024           # Number of time frames in spectrogram.

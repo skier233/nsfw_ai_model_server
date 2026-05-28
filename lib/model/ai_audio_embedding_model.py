@@ -6,7 +6,7 @@ from lib.model.ai_model import AIModel
 
 
 class AIAudioEmbeddingModel(AIModel):
-    """AI model subclass for audio/speaker embedding (ECAPA-TDNN via torch.export).
+    """AI model subclass for audio embedding via torch.export.
 
     Produces a dense embedding vector for each input audio segment.
     Output: [{"vector": [...], "norm": float, "embedder": "model_name", "dim": int}]
@@ -60,7 +60,7 @@ class AIAudioEmbeddingModel(AIModel):
             batch = torch.stack(padded, dim=0)
             batch = batch.to(self.device)
 
-            # ECAPA-TDNN is exported in float32 — bypass PythonModel.run_raw()
+            # The exported audio embedding graph runs in float32 - bypass PythonModel.run_raw()
             # which would convert input to half and break the float32 graph.
             with torch.no_grad():
                 embeddings = self.model.model(batch)

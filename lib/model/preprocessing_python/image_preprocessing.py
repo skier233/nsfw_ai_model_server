@@ -1000,6 +1000,8 @@ def preprocess_video_av_seek(
     try:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
+        average_rate = float(stream.average_rate) if stream.average_rate else 30.0
+        frame_tolerance = 0.5 / average_rate if average_rate > 0 else 0.02
 
         # Determine duration in seconds
         if stream.duration and stream.time_base:
@@ -1034,9 +1036,18 @@ def preprocess_video_av_seek(
                     container.seek(target_pts, stream=stream)
 
                     frame = None
+                    last_frame = None
+                    min_frame_time = max(t - frame_tolerance, 0.0)
                     for f in container.decode(video=0):
-                        frame = f
-                        break
+                        last_frame = f
+                        frame_time = float(f.time) if f.time is not None else None
+                        if frame_time is None and f.pts is not None:
+                            frame_time = float(f.pts * time_base)
+                        if frame_time is None or frame_time >= min_frame_time:
+                            frame = f
+                            break
+                    if frame is None:
+                        frame = last_frame
                     if frame is None:
                         break
 

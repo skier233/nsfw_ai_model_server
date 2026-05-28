@@ -1,11 +1,9 @@
+from pathlib import Path
 from typing import Iterable
 
 from lib.configurator.configure_active_ai import (
-    load_active_ai_config,
     load_active_ai_models,
     load_available_ai_models,
-    load_pinned_ai_models,
-    save_active_ai_config,
 )
 
 
@@ -14,7 +12,9 @@ VALID_LOAD_POLICIES = {"use_loaded", "load_if_cheap", "load_or_fail"}
 
 def get_model_catalog(server_manager):
     active_model_names = set(load_active_ai_models())
-    pinned_model_names = set(load_pinned_ai_models())
+    available_models = load_available_ai_models()
+    available_by_name = {model.get("yaml_file_name"): model for model in available_models}
+    active_categories = _get_active_categories(active_model_names, available_by_name)
     loaded_model_names = set()
     loaded_model_file_names = set()
 
@@ -25,31 +25,78 @@ def get_model_catalog(server_manager):
             loaded_model_file_names.add(model_info.name)
 
     catalog = []
-    for model_config in load_available_ai_models():
+    for model_config in available_models:
         config_name = model_config.get("yaml_file_name")
         file_name = model_config.get("model_file_name") or config_name
+        categories = _normalize_string_list(model_config.get("model_category")) or []
+        category_conflicts = _get_category_conflicts(config_name, categories, active_model_names, active_categories)
+        artifact_available, artifact_path = _model_artifact_status(model_config)
+        incompatibility_reasons = []
+        if category_conflicts:
+            incompatibility_reasons.append(f"Category already active: {', '.join(category_conflicts)}")
+        if not artifact_available:
+            incompatibility_reasons.append(f"Model file missing: {artifact_path}")
         entry = {
             "config_name": config_name,
             "name": file_name,
             "identifier": model_config.get("model_identifier"),
             "version": model_config.get("model_version"),
-            "categories": _normalize_string_list(model_config.get("model_category")) or [],
+            "categories": categories,
             "type": model_config.get("model_type", model_config.get("type")),
+            "info": model_config.get("model_info"),
+            "image_size": model_config.get("model_image_size"),
+            "artifact_available": artifact_available,
+            "artifact_path": artifact_path,
+            "incompatible": bool(incompatibility_reasons) and config_name not in active_model_names,
+            "incompatibility_reason": "; ".join(incompatibility_reasons),
             "capabilities": _resolve_capabilities(model_config),
             "supported_scopes": _resolve_supported_scopes(model_config),
             "active": config_name in active_model_names,
             "loaded": config_name in loaded_model_names or file_name in loaded_model_file_names,
-            "pinned": config_name in pinned_model_names,
         }
         catalog.append(entry)
 
-    catalog.sort(key=lambda item: (item["active"] is False, item["config_name"]))
+    catalog.sort(key=lambda item: (item["active"] is False, (item.get("categories") or [""])[0], item["config_name"]))
     return catalog
 
 
 def get_loaded_models(server_manager):
     catalog = get_model_catalog(server_manager)
     return [entry for entry in catalog if entry["active"] or entry["loaded"]]
+
+
+def get_capability_catalog(server_manager):
+    capability_index = {}
+
+    for entry in get_model_catalog(server_manager):
+        for capability in entry.get("capabilities") or []:
+            capability_entry = capability_index.setdefault(
+                capability,
+                {
+                    "capability": capability,
+                    "supported_scopes": set(),
+                    "models": [],
+                },
+            )
+            capability_entry["supported_scopes"].update(entry.get("supported_scopes") or [])
+            capability_entry["models"].append(
+                {
+                    "config_name": entry["config_name"],
+                    "name": entry["name"],
+                    "type": entry.get("type"),
+                    "loaded": entry.get("loaded", False),
+                    "active": entry.get("active", False),
+                }
+            )
+
+    capabilities = []
+    for capability_name in sorted(capability_index):
+        capability_entry = capability_index[capability_name]
+        capability_entry["supported_scopes"] = sorted(capability_entry["supported_scopes"])
+        capability_entry["models"].sort(key=lambda item: (item["loaded"] is False, item["config_name"]))
+        capabilities.append(capability_entry)
+
+    return capabilities
 
 
 def filter_pipeline_models(pipeline, requested_model_names=None):
@@ -83,54 +130,24 @@ async def resolve_request_models(server_manager, want, default_scope, load_polic
     next_active = list(active_model_names)
     next_active.extend(missing_models)
     next_active = _dedupe(next_active)
-    pinned_models = _dedupe(load_pinned_ai_models())
-    await server_manager.reload_active_models(active_ai_models=next_active, pinned_ai_models=pinned_models)
+    _validate_models_can_activate(missing_models, active_model_names)
+    await server_manager.update_active_models(active_ai_models=next_active)
     return requested_model_names, True
 
 
 async def load_models(server_manager, model_names):
     requested = _validate_model_names(model_names, server_manager)
-    active_model_names = _dedupe(load_active_ai_models() + requested)
-    pinned_model_names = _dedupe(load_pinned_ai_models())
-    await server_manager.reload_active_models(active_ai_models=active_model_names, pinned_ai_models=pinned_model_names)
+    current_active = load_active_ai_models()
+    _validate_models_can_activate(requested, current_active)
+    active_model_names = _dedupe(current_active + requested)
+    await server_manager.update_active_models(active_ai_models=active_model_names)
     return get_loaded_models(server_manager)
 
 
 async def unload_models(server_manager, model_names):
     requested = _validate_model_names(model_names, server_manager)
-    pinned_model_names = set(load_pinned_ai_models())
-    blocked = sorted(pinned_model_names.intersection(requested))
-    if blocked:
-        raise RuntimeError(f"Cannot unload pinned models: {blocked}")
-
     active_model_names = [name for name in load_active_ai_models() if name not in requested]
-    await server_manager.reload_active_models(active_ai_models=_dedupe(active_model_names), pinned_ai_models=sorted(pinned_model_names))
-    return get_loaded_models(server_manager)
-
-
-async def set_pinned_models(server_manager, model_names, pinned):
-    requested = _validate_model_names(model_names, server_manager)
-    config = dict(load_active_ai_config())
-    active_model_names = _dedupe(config.get("active_ai_models", []) or [])
-    pinned_model_names = set(config.get("pinned_ai_models", []) or [])
-
-    if pinned:
-        changed_active = False
-        for model_name in requested:
-            pinned_model_names.add(model_name)
-            if model_name not in active_model_names:
-                active_model_names.append(model_name)
-                changed_active = True
-        if changed_active:
-            await server_manager.reload_active_models(active_ai_models=active_model_names, pinned_ai_models=sorted(pinned_model_names))
-        else:
-            config["pinned_ai_models"] = sorted(pinned_model_names)
-            save_active_ai_config(config)
-    else:
-        pinned_model_names.difference_update(requested)
-        config["pinned_ai_models"] = sorted(pinned_model_names)
-        save_active_ai_config(config)
-
+    await server_manager.update_active_models(active_ai_models=_dedupe(active_model_names))
     return get_loaded_models(server_manager)
 
 
@@ -150,6 +167,10 @@ def resolve_want_model_names(server_manager, want, default_scope):
                 if model_name not in catalog_by_name:
                     raise ValueError(f"Unknown model '{model_name}'")
             requested_model_names.extend(explicit_models)
+
+            # When a want item names explicit models, honor that exact set
+            # instead of broadening the request by capability/scope.
+            continue
 
         requested_capabilities = set(_normalize_string_list(getattr(item, "capability", None)) or [])
         requested_capabilities.update(_normalize_string_list(getattr(item, "capabilities", None)) or [])
@@ -173,6 +194,83 @@ def resolve_want_model_names(server_manager, want, default_scope):
             requested_model_names.extend(matched)
 
     return _dedupe(requested_model_names)
+
+
+def _get_available_models_by_name():
+    return {model.get("yaml_file_name"): model for model in load_available_ai_models()}
+
+
+def _get_active_categories(active_model_names, available_by_name):
+    categories = set()
+    for model_name in active_model_names:
+        model_config = available_by_name.get(model_name)
+        if not model_config:
+            continue
+        categories.update(_normalize_string_list(model_config.get("model_category")) or [])
+    return categories
+
+
+def _get_category_conflicts(config_name, categories, active_model_names, active_categories):
+    if config_name in active_model_names:
+        return []
+    return sorted(category for category in categories if category in active_categories)
+
+
+def _validate_models_can_activate(model_names, current_active_model_names):
+    available_by_name = _get_available_models_by_name()
+    active_model_names = set(current_active_model_names or [])
+    active_categories = _get_active_categories(active_model_names, available_by_name)
+
+    for model_name in model_names:
+        if model_name in active_model_names:
+            continue
+        model_config = available_by_name.get(model_name)
+        if not model_config:
+            raise ValueError(f"Unknown model '{model_name}'")
+
+        categories = _normalize_string_list(model_config.get("model_category")) or []
+        conflicts = _get_category_conflicts(model_name, categories, active_model_names, active_categories)
+        if conflicts:
+            raise ValueError(f"Cannot activate model '{model_name}': category already active: {', '.join(conflicts)}")
+
+        artifact_available, artifact_path = _model_artifact_status(model_config)
+        if not artifact_available:
+            raise ValueError(f"Cannot activate model '{model_name}': model file missing: {artifact_path}")
+
+        active_model_names.add(model_name)
+        active_categories.update(categories)
+
+
+def _model_artifact_status(model_config):
+    model_file_name = model_config.get("model_file_name") or model_config.get("yaml_file_name")
+    if not model_file_name:
+        return False, "model file name is not configured"
+
+    license_name = model_config.get("model_license_name")
+    if license_name:
+        model_path = Path("./models") / f"{model_file_name}{_encrypted_model_extension(license_name)}"
+        return model_path.exists(), str(model_path)
+
+    candidates = [Path("./models") / f"{model_file_name}.pt2", Path("./models") / f"{model_file_name}.pt"]
+    for candidate in candidates:
+        if candidate.exists():
+            return True, str(candidate)
+    return False, str(candidates[0])
+
+
+def _encrypted_model_extension(license_name):
+    parts = str(license_name or "").split(".")
+    if len(parts) == 2:
+        minor_part = parts[-1]
+    elif len(parts) >= 3:
+        minor_part = parts[-2]
+    else:
+        minor_part = None
+    try:
+        minor = int(minor_part) if minor_part is not None else 1
+    except ValueError:
+        minor = 1
+    return {0: ".pt.enc", 1: ".pt2.enc", 2: ".ep.enc"}.get(minor, ".pt2.enc")
 
 
 def _validate_model_names(model_names, server_manager):

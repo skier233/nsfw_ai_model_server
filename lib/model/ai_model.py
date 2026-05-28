@@ -86,7 +86,8 @@ class AIModel(Model):
     def update_batch_with_mutli_models(self, model_count):
         batch_multipliers = [1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
         if self.batch_size_per_VRAM_GB is not None and (torch.cuda.is_available() or torch.xpu.is_available()):
-            batch_size_temp = self.batch_size_per_VRAM_GB * batch_multipliers[model_count - 1]
+            multiplier_index = min(max(model_count, 1), len(batch_multipliers)) - 1
+            batch_size_temp = self.batch_size_per_VRAM_GB * batch_multipliers[multiplier_index]
             if self.device == "cuda":
                 gpuMemory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
             elif self.device == "xpu":

@@ -208,6 +208,7 @@ class VideoPreprocessorModel(Model):
                 _result_q = queue.Queue(maxsize=_QUEUE_DEPTH)
                 _producer_error = []
                 _cumulative_cpu = [0.0]   # mutable float for thread
+                _requested_model_names = itemFuture[item.input_names[7]] if len(item.input_names) > 7 else None
 
                 def _frame_producer():
                     # Build CPU-only variants of specs so that apply_spec
@@ -221,7 +222,6 @@ class VideoPreprocessorModel(Model):
                         _dc_replace(sp, device="cpu") if sp.device != "cpu" else sp
                         for sp in self.specs
                     ]
-                    _requested_model_names = itemFuture[item.input_names[7]] if len(item.input_names) > 7 else None
                     _out_names = item.output_names
                     _ss = spec_start
                     try:

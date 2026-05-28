@@ -474,10 +474,10 @@ async def audio_result_postprocessor(data):
     """Post-processor for the audio embedding pipeline.
 
     Receives per-window collated results from batch_awaiter, then:
-      1. AST semantic filtering — reject windows dominated by music
-      2. Type-binning — classify kept windows as moan/speech/breath
-      3. Per-type centroid embedding — mean of ECAPA vectors per type, L2-normalised
-      4. Overall centroid — mean of all kept ECAPA vectors
+            1. Classification filtering - reject windows dominated by music
+            2. Type-binning - classify kept windows as moan/speech/breath
+            3. Per-type centroid embedding - mean of audio embedding vectors per type, L2-normalised
+            4. Overall centroid - mean of all kept audio embedding vectors
     """
     for item in data:
         itemFuture = item.item_future
@@ -491,7 +491,7 @@ async def audio_result_postprocessor(data):
         if not isinstance(children_results, list):
             children_results = []
 
-        # ── AudioSet category indices ──
+        # Classification category indices
         # Whitelist: human non-speech vocalizations we want to keep
         IDX_WHITELIST = [8, 9, 14, 22, 24, 25, 38, 39, 44, 45, 46]
         # Speech
@@ -505,7 +505,7 @@ async def audio_result_postprocessor(data):
         IDX_MOAN = [25, 38, 39, 22, 24, 44, 45, 46, 14, 8, 9]
         IDX_BREATH = [41, 26, 43]
 
-        threshold = 0.01  # AST sigmoid scores are typically low for specific classes
+        threshold = 0.01  # Classifier sigmoid scores are typically low for specific classes
 
         kept_windows = []
         rejected_music = 0
@@ -517,11 +517,11 @@ async def audio_result_postprocessor(data):
             if "_error" in win:
                 continue
 
-            # Extract AST probabilities
-            ast_list = win.get("audio_classification_ast", [])
+            # Extract classifier probabilities
+            classifier_list = win.get("audio_classification_audioclass", [])
             probs = None
-            if ast_list and isinstance(ast_list, list) and isinstance(ast_list[0], dict):
-                probs = ast_list[0].get("probabilities")
+            if classifier_list and isinstance(classifier_list, list) and isinstance(classifier_list[0], dict):
+                probs = classifier_list[0].get("probabilities")
 
             if probs is None:
                 # No classification available — keep by default
@@ -557,12 +557,12 @@ async def audio_result_postprocessor(data):
 
         for win in kept_windows:
             probs = None
-            ast_list = win.get("audio_classification_ast", [])
-            if ast_list and isinstance(ast_list, list) and isinstance(ast_list[0], dict):
-                probs = ast_list[0].get("probabilities")
+            classifier_list = win.get("audio_classification_audioclass", [])
+            if classifier_list and isinstance(classifier_list, list) and isinstance(classifier_list[0], dict):
+                probs = classifier_list[0].get("probabilities")
 
             # Extract embedding vector
-            emb_list = win.get("audio_embeddings_ecapa", [])
+            emb_list = win.get("audio_embeddings_audioembed", [])
             vector = None
             if emb_list and isinstance(emb_list, list) and isinstance(emb_list[0], dict):
                 vector = emb_list[0].get("vector")
@@ -705,6 +705,7 @@ async def detector_result_to_region_targets(data):
 
         frame_index = None
         source_tensor = None
+        detector_tensor = None
         parent_target_id = None
         bbox_scale_x = 1.0
         bbox_scale_y = 1.0
@@ -720,6 +721,8 @@ async def detector_result_to_region_targets(data):
             fourth_input = itemFuture[item.input_names[3]]
             if source_tensor is None and isinstance(fourth_input, torch.Tensor):
                 source_tensor = fourth_input
+            elif isinstance(fourth_input, torch.Tensor):
+                detector_tensor = fourth_input
             elif frame_index is None:
                 frame_index = fourth_input
             else:
@@ -727,20 +730,20 @@ async def detector_result_to_region_targets(data):
 
         if len(item.input_names) > 4:
             fifth_input = itemFuture[item.input_names[4]]
-            if not isinstance(fifth_input, torch.Tensor):
+            if isinstance(fifth_input, torch.Tensor):
+                detector_tensor = fifth_input
+            else:
                 parent_target_id = fifth_input
 
         source_height, source_width = _extract_tensor_hw(source_tensor)
 
         # Compute bbox scale AFTER source dimensions are known.
-        if len(item.input_names) > 4:
-            fifth_input = itemFuture[item.input_names[4]]
-            if isinstance(fifth_input, torch.Tensor):
-                det_h, det_w = _extract_tensor_hw(fifth_input)
-                if (det_h and det_w and source_height and source_width
-                        and (det_h != source_height or det_w != source_width)):
-                    bbox_scale_x = source_width / det_w
-                    bbox_scale_y = source_height / det_h
+        if isinstance(detector_tensor, torch.Tensor):
+            det_h, det_w = _extract_tensor_hw(detector_tensor)
+            if (det_h and det_w and source_height and source_width
+                    and (det_h != source_height or det_w != source_width)):
+                bbox_scale_x = source_width / det_w
+                bbox_scale_y = source_height / det_h
 
         candidate_detections = _extract_detection_items(detections)
 

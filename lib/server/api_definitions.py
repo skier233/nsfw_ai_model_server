@@ -44,6 +44,7 @@ class AnalyzeWantV4(BaseModel):
 
 class ImageRequestV4(BaseModel):
     paths: List[str]
+    pipeline_name: str | None = None
     threshold: float = None
     return_confidence: bool = True
     categories_to_skip: List[str] | None = None
@@ -53,6 +54,7 @@ class ImageRequestV4(BaseModel):
 
 class VideoRequestV4(BaseModel):
     path: str
+    pipeline_name: str | None = None
     frame_interval: float = None
     threshold: float = None
     return_confidence: bool = True
@@ -64,6 +66,7 @@ class VideoRequestV4(BaseModel):
 
 class AudioRequestV4(BaseModel):
     paths: List[str]
+    pipeline_name: str | None = None
     threshold: float = None
     want: List[AnalyzeWantV4] | None = None
     load_policy: str = "use_loaded"
@@ -73,9 +76,25 @@ class ModelSelectionRequestV4(BaseModel):
     models: List[str]
 
 
-class ModelPinRequestV4(BaseModel):
-    models: List[str]
-    pinned: bool = True
+class TextEncodeRequestV4(BaseModel):
+    text: str
+    kind_family: str
+
+
+class CustomPipelineRequestV4(BaseModel):
+    pipeline_name: str
+    display_name: str | None = None
+    media_kind: str
+    capability_id: str | None = None
+    description: str | None = None
+    capability_ids: List[str] | None = None
+    claim_ids: List[str] | None = None
+    use_all_full_image_models: bool = False
+    full_image_models: List[str] | None = None
+    detector_models: List[str] | None = None
+    region_models: Dict[str, List[str]] | None = None
+    use_all_audio_models: bool = False
+    audio_models: List[str] | None = None
 
 class OptimizeMarkerSettings(BaseModel):
     existing_json_data: Any = None

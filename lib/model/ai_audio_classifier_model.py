@@ -6,9 +6,9 @@ from lib.model.ai_model import AIModel
 
 
 class AIAudioClassifierModel(AIModel):
-    """AI model subclass for audio classification (AST via torch.export).
+    """AI model subclass for audio classification via torch.export.
 
-    Produces AudioSet-style classification scores for gating and type-binning.
+    Produces classification scores for gating and type-binning.
     Output: [{"scores": {category: float, ...}, "top5": [(label, score), ...],
               "dominant_type": str, "classifier": "model_name"}]
 

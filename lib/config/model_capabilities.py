@@ -363,7 +363,7 @@ class ModelCapabilitiesConfig:
     def _resolve_all_audio_model_names(self, available_models: Optional[Sequence[Any]]) -> List[str]:
         """Auto-discover all active models with audio-compatible capabilities/types."""
         if not available_models:
-            return sorted(self.active_model_library)
+            return []
 
         resolved = []
         for model in available_models:

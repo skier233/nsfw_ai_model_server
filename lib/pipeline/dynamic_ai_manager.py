@@ -37,6 +37,20 @@ class DynamicAIManager:
         self.models = []
         self.models_by_config_name = {}
 
+    def reload_active_config(self):
+        self.configfile = load_config(ai_active_directory)
+        self.ai_model_names = self.configfile.get("active_ai_models", [])
+        self.active_capabilities = self.configfile.get("active_capabilities", None)
+        self.capability_model_groups = self.configfile.get("capability_model_groups", None)
+        self.model_capabilities = ModelCapabilitiesConfig(
+            config=load_model_capabilities_config(),
+            active_model_library=self.ai_model_names,
+            logger=self.logger,
+        )
+        self.loaded = False
+        self.models = []
+        self.models_by_config_name = {}
+
     def set_known_pipelines(self, pipeline_names):
         self.model_capabilities.set_known_pipelines(pipeline_names)
         self.model_capabilities.prune_unavailable_models()
@@ -56,6 +70,9 @@ class DynamicAIManager:
             loaded_model = self.model_manager.get_or_create_model(model_name)
             if loaded_model is not None:
                 loaded_model.config_name = model_name
+                child_model = getattr(loaded_model, "model", None)
+                if child_model is not None:
+                    child_model.config_name = model_name
             self.models_by_config_name[model_name] = loaded_model
             models.append(loaded_model)
         models = [model for model in models if model is not None]
@@ -248,7 +265,7 @@ class DynamicAIManager:
             region_source_spec, region_model_rules, pipeline_name,
             threshold_key=inputs[1], return_confidence_key=inputs[2],
             skipped_categories_key=inputs[3],
-            region_targets_extra_inputs_fn=lambda det_key, rs_key: [inputs[0], rs_key],
+            region_targets_extra_inputs_fn=lambda det_key, rs_key: [inputs[0], rs_key] + ([det_key] if det_key != rs_key else []),
         )
 
         # ── Coalesce ──
@@ -332,7 +349,7 @@ class DynamicAIManager:
         Follows the video pipeline one-to-many pattern:
         - The audio preprocessor extracts audio, separates vocals, detects speech
           regions, and spawns one child ItemFuture per overlapping window.
-        - Each child flows independently through ECAPA-TDNN and AST.
+        - Each child flows independently through the selected audio models.
         - result_coalescer collects per-window model outputs.
         - result_finisher marks the child future as done.
         - batch_awaiter waits for all children and writes the aggregated list

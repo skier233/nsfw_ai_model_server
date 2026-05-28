@@ -93,12 +93,13 @@ class ModelProcessor():
         self.worker_tasks = []
         self.stopped = False
 
-    def update_values_from_child_model(self):
+    def update_values_from_child_model(self, reset_queue=True):
         self.instance_count = self.model.instance_count
-        if self.model.max_queue_size is None:
-            self.queue = asyncio.Queue()
-        else:
-            self.queue = asyncio.Queue(maxsize=self.model.max_queue_size)
+        if reset_queue:
+            if self.model.max_queue_size is None:
+                self.queue = asyncio.Queue()
+            else:
+                self.queue = asyncio.Queue(maxsize=self.model.max_queue_size)
         self.max_batch_size = self.model.max_batch_size
         self.max_batch_waits = self.model.max_batch_waits
         self.batch_collect_timeout = getattr(self.model, "batch_collect_timeout", 0.01)

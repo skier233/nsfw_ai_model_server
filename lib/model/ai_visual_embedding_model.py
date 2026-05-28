@@ -6,7 +6,7 @@ from lib.model.ai_model import AIModel
 
 
 class AIVisualEmbeddingModel(AIModel):
-    """AI model subclass for visual embedding (DINOv3, MetaCLIP2, etc. via torch.export).
+    """AI model subclass for visual embedding (generic visual encoders via torch.export).
 
     Produces a dense embedding vector for each input image/frame.
     Output: [{"vector": [...], "norm": float, "embedder": "model_name", "dim": int}]

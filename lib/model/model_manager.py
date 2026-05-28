@@ -106,17 +106,18 @@ class ModelManager:
         if model_count > 1:
             for mp in self.ai_models:
                 mp.model.update_batch_with_mutli_models(model_count)
-                mp.update_values_from_child_model()
+                mp.update_values_from_child_model(reset_queue=not getattr(mp, "workers_started", False))
 
-    def compute_vram_batch_sizes(self):
+    def compute_vram_batch_sizes(self, ai_model_processors=None):
         """Recompute batch sizes for all AI models using VRAM budget allocation.
 
         Should be called after all models are created but before they are loaded,
         so that weight estimates reflect the full set of active models.
         """
-        if not self.ai_models:
+        model_processors = list(ai_model_processors) if ai_model_processors is not None else list(self.ai_models)
+        if not model_processors:
             return
-        ai_model_instances = [mp.model for mp in self.ai_models
+        ai_model_instances = [mp.model for mp in model_processors
                               if mp is not None and isinstance(mp.model, AIModel)]
         if not ai_model_instances:
             return
@@ -135,6 +136,6 @@ class ModelManager:
         compute_batch_sizes(ai_model_instances, device,
                             max_pending_frames=max_pending_frames)
         # Sync ModelProcessor fields with updated child model values
-        for mp in self.ai_models:
+        for mp in model_processors:
             if mp is not None:
-                mp.update_values_from_child_model()
+                mp.update_values_from_child_model(reset_queue=not getattr(mp, "workers_started", False))

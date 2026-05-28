@@ -23,20 +23,7 @@ def load_active_ai_models():
     return data.get('active_ai_models', []) or []
 
 def save_active_ai_models(active_ai_models):
-    existing = load_active_ai_config()
-    existing['active_ai_models'] = active_ai_models
-    save_active_ai_config(existing)
-
-
-def load_pinned_ai_models():
-    data = load_active_ai_config()
-    return data.get('pinned_ai_models', []) or []
-
-
-def save_pinned_ai_models(pinned_ai_models):
-    existing = load_active_ai_config()
-    existing['pinned_ai_models'] = pinned_ai_models
-    save_active_ai_config(existing)
+    save_active_ai_config({'active_ai_models': active_ai_models})
 
 # Model types that represent user-selectable AI models in the active AI selector.
 _AI_MODEL_TYPES = {"model", "face_torch_export", "visual_embedding", "audio_embedding", "audio_classifier"}

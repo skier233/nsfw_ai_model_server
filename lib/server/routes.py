@@ -10,26 +10,29 @@ from lib.model.preprocessing.input_logic import process_video_preprocess
 from lib.server.api_definitions import (
     AudioRequest,
     AudioRequestV4,
+    CustomPipelineRequestV4,
     ImagePathList,
     ImageRequestV3,
     ImageRequestV4,
-    ModelPinRequestV4,
     ModelSelectionRequestV4,
     OptimizeMarkerSettings,
+    TextEncodeRequestV4,
     VideoPathList,
     ImageResult,
     VideoRequestV3,
     VideoRequestV4,
     VideoResult,
 )
+from lib.server.text_encoding_service import text_encoding_service
 from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
 from lib.server.v4_service import (
+    VALID_LOAD_POLICIES,
     filter_pipeline_models,
+    get_capability_catalog,
     get_loaded_models,
     get_model_catalog,
     load_models,
     resolve_request_models,
-    set_pinned_models,
     unload_models,
 )
 import torch
@@ -437,6 +440,61 @@ async def get_v4_model_catalog():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/v4/capabilities")
+async def get_v4_capabilities():
+    try:
+        return {
+            "capabilities": get_capability_catalog(server_manager),
+            "load_policies": sorted(VALID_LOAD_POLICIES),
+        }
+    except Exception as e:
+        logger.error(f"Error getting v4 capabilities: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v4/health")
+async def get_v4_health():
+    try:
+        catalog = get_model_catalog(server_manager)
+        loaded_models = get_loaded_models(server_manager)
+        pipelines = server_manager.pipeline_manager.pipelines
+
+        response = {
+            "status": "ok",
+            "time": time.time(),
+            "loaded_pipelines": sorted(pipelines.keys()),
+            "loaded_pipeline_count": len(pipelines),
+            "model_count": len(catalog),
+            "loaded_model_count": len(loaded_models),
+            "active_model_count": sum(1 for entry in catalog if entry.get("active")),
+            "request_timeout_seconds": _get_request_timeout(),
+        }
+
+        try:
+            response["outstanding_requests"] = outstanding_requests_middleware.outstanding_requests
+        except Exception:
+            response["outstanding_requests"] = None
+
+        try:
+            response["cuda_available"] = torch.cuda.is_available()
+            if response["cuda_available"]:
+                response["cuda_device_count"] = torch.cuda.device_count()
+                current_device = torch.cuda.current_device()
+                response["current_device"] = current_device
+                response["current_device_name"] = torch.cuda.get_device_name(current_device)
+                response["cuda_memory_allocated_bytes"] = torch.cuda.memory_allocated()
+                response["cuda_memory_reserved_bytes"] = torch.cuda.memory_reserved()
+        except Exception as e:
+            response["cuda_check_error"] = str(e)
+
+        return response
+    except Exception as e:
+        logger.error(f"Error getting v4 health: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/v4/models/loaded")
 async def get_v4_loaded_models():
     try:
@@ -475,15 +533,44 @@ async def unload_v4_models(request: ModelSelectionRequestV4):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v4/models/pin")
-async def pin_v4_models(request: ModelPinRequestV4):
+@app.post("/v4/encode/text")
+async def encode_v4_text(request: TextEncodeRequestV4):
     try:
-        loaded_models = await set_pinned_models(server_manager, request.models, request.pinned)
-        return {"models": loaded_models}
+        return await asyncio.to_thread(text_encoding_service.encode, request.kind_family, request.text)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
-        logger.error(f"Error pinning v4 models: {e}")
+        logger.error(f"Error encoding text v4: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v4/pipelines/custom")
+async def register_v4_custom_pipeline(request: CustomPipelineRequestV4):
+    try:
+        return await server_manager.register_custom_pipeline(request)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error registering custom v4 pipeline: {e}")
+        logger.debug("Stack trace:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/v4/pipelines/custom/{pipeline_name}")
+async def delete_v4_custom_pipeline(pipeline_name: str):
+    try:
+        return await server_manager.delete_custom_pipeline(pipeline_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error deleting custom v4 pipeline: {e}")
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -497,7 +584,7 @@ async def process_images_v4(request: ImageRequestV4):
             default_scope="asset",
             load_policy=request.load_policy,
         )
-        pipeline_name = "image_pipeline_dynamic_v4"
+        pipeline_name = request.pipeline_name or "image_pipeline_dynamic_v4"
         timeout = _get_request_timeout()
         futures = [
             await server_manager.get_request_future(
@@ -542,7 +629,7 @@ async def process_video_v4(request: VideoRequestV4):
             default_scope="frame",
             load_policy=request.load_policy,
         )
-        pipeline_name = "video_pipeline_dynamic_v4"
+        pipeline_name = request.pipeline_name or "video_pipeline_dynamic_v4"
         timeout = _get_request_timeout()
         future = await server_manager.get_request_future(
             [
@@ -584,7 +671,7 @@ async def process_audio_v4(request: AudioRequestV4):
             default_scope="asset",
             load_policy=request.load_policy,
         )
-        pipeline_name = "audio_pipeline_v4"
+        pipeline_name = request.pipeline_name or "audio_pipeline_v4"
         if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
             raise HTTPException(
                 status_code=501,
@@ -629,8 +716,8 @@ async def process_audio_v4(request: AudioRequestV4):
 async def process_audio(request: AudioRequest):
     """Process audio files through the audio embedding pipeline.
 
-    Extracts audio from media files and produces speaker embeddings (ECAPA-TDNN)
-    and optionally AudioSet classification scores (AST) for gating/type-binning.
+    Extracts audio from media files and produces audio embeddings
+    and optional classification scores for gating/type-binning.
     """
     try:
         audio_paths = request.paths
