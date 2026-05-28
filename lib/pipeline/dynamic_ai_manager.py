@@ -103,7 +103,7 @@ class DynamicAIManager:
                     stage="detector",
                     available_models=self.models,
                 )
-                _region_rules = self.model_capabilities.get_region_model_rules(pipeline_name)
+                _region_rules = self.model_capabilities.get_region_model_rules(pipeline_name, available_models=self.models)
                 has_region_branches = bool(_det_names) and bool(_region_rules)
             if not has_region_branches:
                 requested_caps = _normalize_string_list(required_capabilities)
@@ -522,7 +522,7 @@ class DynamicAIManager:
             detector_names = self.model_capabilities.resolve_model_names_for_stage(
                 pipeline_name=pipeline_name, stage="detector", available_models=self.models,
             ) or []
-            region_model_rules = self.model_capabilities.get_region_model_rules(pipeline_name) or []
+            region_model_rules = self.model_capabilities.get_region_model_rules(pipeline_name, available_models=self.models) or []
 
             if detector_names and region_model_rules:
                 detector_models = self._select_models_by_name(detector_names)
@@ -592,10 +592,12 @@ class DynamicAIManager:
             return additional_coalesce_inputs
 
         region_source_key = region_source_spec.key
-        region_rules_by_detector = {
-            str(rule.get("key", "")).strip(): rule
-            for rule in region_model_rules
-        }
+        region_rules_by_detector = {}
+        for rule in region_model_rules:
+            detector_key = str(rule.get("key", "")).strip()
+            if not detector_key:
+                continue
+            region_rules_by_detector.setdefault(detector_key, []).append(rule)
 
         for detector_name, detector_model in zip(detector_names, detector_models):
             det_spec = detector_to_spec[detector_name]
@@ -609,23 +611,8 @@ class DynamicAIManager:
                 detector_outputs,
             ))
 
-            detector_rule = region_rules_by_detector.get(detector_name)
-            if detector_rule is None:
-                continue
-
-            region_model_names = list(detector_rule.get("models", []) or [])
-            if not region_model_names:
-                label_model_map = detector_rule.get("label_models", {}) or {}
-                for label_models in label_model_map.values():
-                    region_model_names.extend(_normalize_string_list(label_models) or [])
-                region_model_names = _dedupe_strings(region_model_names)
-                if region_model_names:
-                    self.logger.warning(
-                        f"Pipeline '{pipeline_name}' defines label-specific region_models for detector '{detector_name}', "
-                        f"but label-specific routing is not available yet. Running union of all configured label model lists."
-                    )
-
-            if not region_model_names:
+            detector_rules = region_rules_by_detector.get(detector_name) or []
+            if not detector_rules:
                 continue
             if not detector_outputs:
                 self.logger.warning(
@@ -643,14 +630,6 @@ class DynamicAIManager:
             alias = _sanitize_key(detector_name)
             rt_key = f"region_targets__{alias}"
             re_key = f"region_errors__{alias}"
-            ch_key = f"dynamic_region_children__{alias}"
-            ri_key = f"dynamic_region_image__{alias}"
-            rtg_key = f"dynamic_region_target__{alias}"
-            th_key = f"dynamic_threshold__{alias}"
-            rc_key = f"dynamic_return_confidence__{alias}"
-            sc_key = f"dynamic_skipped_categories__{alias}"
-            rr_key = f"dynamic_region_result__{alias}"
-            rrs_key = f"regions__{alias}"
             ci_key = "detection_index"  # clean name for coalescer
 
             extra_inputs = region_targets_extra_inputs_fn(det_input_key, region_source_key)
@@ -660,33 +639,50 @@ class DynamicAIManager:
                 [rt_key, re_key],
             ))
 
-            model_wrappers.append(ModelWrapper(
-                self.model_manager.get_or_create_model("region_children_builder"),
-                [region_source_key, rt_key, threshold_key, return_confidence_key, skipped_categories_key],
-                [ch_key, ri_key, rtg_key, th_key, rc_key, sc_key, f"dynamic_region_source__{alias}", ci_key],
-            ))
+            for rule_index, detector_rule in enumerate(detector_rules):
+                region_model_names = _dedupe_strings(list(detector_rule.get("models", []) or []))
+                if not region_model_names:
+                    continue
 
-            region_models = self._select_models_by_name(region_model_names)
-            region_branch_outputs = []
-            for region_model in region_models:
-                branch_outputs = _normalize_string_list(region_model.model.model_category) or []
-                region_branch_outputs.extend(branch_outputs)
+                labels = _normalize_string_list(detector_rule.get("labels", []) or []) or []
+                label_suffix = _format_label_filter_suffix(labels)
+                branch_alias = alias if len(detector_rules) == 1 and not label_suffix else f"{alias}__rule_{rule_index}{label_suffix}"
+                ch_key = f"dynamic_region_children__{branch_alias}"
+                ri_key = f"dynamic_region_image__{branch_alias}"
+                rtg_key = f"dynamic_region_target__{branch_alias}"
+                th_key = f"dynamic_threshold__{branch_alias}"
+                rc_key = f"dynamic_return_confidence__{branch_alias}"
+                sc_key = f"dynamic_skipped_categories__{branch_alias}"
+                rr_key = f"dynamic_region_result__{branch_alias}"
+                rrs_key = f"regions__{branch_alias}"
+
                 model_wrappers.append(ModelWrapper(
-                    region_model, [ri_key, th_key, rc_key, sc_key], branch_outputs,
+                    self.model_manager.get_or_create_model("region_children_builder"),
+                    [region_source_key, rt_key, threshold_key, return_confidence_key, skipped_categories_key],
+                    [ch_key, ri_key, rtg_key, th_key, rc_key, sc_key, f"dynamic_region_source__{branch_alias}", ci_key],
                 ))
 
-            model_wrappers.append(ModelWrapper(
-                self.model_manager.get_or_create_model("result_coalescer"),
-                [ci_key] + region_branch_outputs, [rr_key],
-            ))
-            model_wrappers.append(ModelWrapper(
-                self.model_manager.get_or_create_model("result_finisher"), [rr_key], [],
-            ))
-            model_wrappers.append(ModelWrapper(
-                self.model_manager.get_or_create_model("batch_awaiter"), [ch_key], [rrs_key],
-            ))
+                region_models = self._select_models_by_name(region_model_names)
+                region_branch_outputs = []
+                for region_model in region_models:
+                    branch_outputs = _normalize_string_list(region_model.model.model_category) or []
+                    region_branch_outputs.extend(branch_outputs)
+                    model_wrappers.append(ModelWrapper(
+                        region_model, [ri_key, th_key, rc_key, sc_key], branch_outputs,
+                    ))
 
-            additional_coalesce_inputs.append(rrs_key)
+                model_wrappers.append(ModelWrapper(
+                    self.model_manager.get_or_create_model("result_coalescer"),
+                    [ci_key] + region_branch_outputs, [rr_key],
+                ))
+                model_wrappers.append(ModelWrapper(
+                    self.model_manager.get_or_create_model("result_finisher"), [rr_key], [],
+                ))
+                model_wrappers.append(ModelWrapper(
+                    self.model_manager.get_or_create_model("batch_awaiter"), [ch_key], [rrs_key],
+                ))
+
+                additional_coalesce_inputs.append(rrs_key)
 
         return additional_coalesce_inputs
     
@@ -833,6 +829,14 @@ def _dedupe_strings(values: List[str]) -> List[str]:
         seen.add(value)
         deduped.append(value)
     return deduped
+
+
+def _format_label_filter_suffix(labels: List[str]) -> str:
+    normalized = [_sanitize_key(label) for label in labels if str(label).strip()]
+    normalized = [label for label in normalized if label]
+    if not normalized:
+        return ""
+    return "__labels__" + "__or__".join(normalized)
 
 
 def _sanitize_key(value: str) -> str:

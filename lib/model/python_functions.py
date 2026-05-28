@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -787,6 +788,15 @@ async def detector_result_to_region_targets(data):
             if kps_raw and (bbox_scale_x != 1.0 or bbox_scale_y != 1.0):
                 kps_raw = [[x * bbox_scale_x, y * bbox_scale_y] for x, y in kps_raw]
 
+            detection_labels = _extract_detection_labels(detection)
+            metadata = {
+                "detection_index": detection_index,
+                "kps": kps_raw,
+            }
+            if detection_labels:
+                metadata["label"] = detection_labels[0]
+                metadata["labels"] = detection_labels
+
             try:
                 target = build_region_target(
                     source_asset_id=str(source_asset_id),
@@ -795,10 +805,7 @@ async def detector_result_to_region_targets(data):
                     parent_target_id=parent_target_id,
                     source_width=source_width,
                     source_height=source_height,
-                    metadata={
-                        "detection_index": detection_index,
-                        "kps": kps_raw,
-                    },
+                    metadata=metadata,
                 )
                 region_targets.append(target)
             except Exception as exc:
@@ -853,6 +860,7 @@ async def region_children_builder(data):
         threshold = itemFuture[item.input_names[2]] if len(item.input_names) > 2 else None
         return_confidence = itemFuture[item.input_names[3]] if len(item.input_names) > 3 else None
         skipped_categories = itemFuture[item.input_names[4]] if len(item.input_names) > 4 else None
+        label_filter = _extract_region_label_filter(item.output_names)
 
         children = []
         if not isinstance(source_tensor, torch.Tensor):
@@ -863,6 +871,9 @@ async def region_children_builder(data):
             raise ValueError("region_children_builder could not determine source tensor dimensions")
 
         for region_target in region_targets:
+            if label_filter and not _region_target_matches_label_filter(region_target, label_filter):
+                continue
+
             bbox = region_target.get("bbox") if isinstance(region_target, dict) else None
             if bbox is None:
                 continue
@@ -926,6 +937,82 @@ def _extract_detection_items(detections):
     if isinstance(detections, list):
         return detections
     return []
+
+
+def _extract_detection_labels(detection):
+    if not isinstance(detection, dict):
+        return []
+
+    labels = []
+    for key in (
+        "label",
+        "labels",
+        "class",
+        "classes",
+        "class_name",
+        "class_names",
+        "category",
+        "categories",
+        "name",
+        "names",
+    ):
+        labels.extend(_normalize_label_values(detection.get(key)))
+    return _dedupe_label_values(labels)
+
+
+def _extract_region_label_filter(output_names):
+    marker = "__labels__"
+    for output_name in output_names or []:
+        text = str(output_name or "")
+        if marker not in text:
+            continue
+        suffix = text.split(marker, 1)[1]
+        labels = [item for item in suffix.split("__or__") if item]
+        return {_normalize_label_key(label) for label in labels if _normalize_label_key(label)}
+    return set()
+
+
+def _region_target_matches_label_filter(region_target, label_filter):
+    if not label_filter or not isinstance(region_target, dict):
+        return True
+    metadata = region_target.get("metadata") or {}
+    labels = _normalize_label_values(metadata.get("labels"))
+    labels.extend(_normalize_label_values(metadata.get("label")))
+    normalized = {_normalize_label_key(label) for label in labels if _normalize_label_key(label)}
+    return bool(normalized & label_filter)
+
+
+def _normalize_label_values(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return [str(key).strip() for key, enabled in value.items() if enabled and str(key).strip()]
+    if isinstance(value, Iterable):
+        return [str(item).strip() for item in value if item is not None and str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _dedupe_label_values(values):
+    seen = set()
+    deduped = []
+    for value in values:
+        key = _normalize_label_key(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(str(value).strip())
+    return deduped
+
+
+def _normalize_label_key(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[^0-9a-z_]+", "_", text)
 
 
 def _extract_detection_bbox(detection):

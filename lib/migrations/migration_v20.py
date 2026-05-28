@@ -40,15 +40,37 @@ def migrate_to_3_0():
     with open(config_path, 'r') as f:
         config_data = yaml.safe_load(f)
     active_pipelines = config_data.get('active_pipelines', [])
-    updated = False
-    if 'video_pipeline_dynamic_v3' not in active_pipelines:
-        active_pipelines.append('video_pipeline_dynamic_v3')
+    legacy_builtin_pipelines = {
+        'image_pipeline_dynamic',
+        'video_pipeline_dynamic',
+        'image_pipeline_dynamic_v3',
+        'video_pipeline_dynamic_v3',
+        'image_pipeline_face_embeddings_v1',
+        'video_pipeline_face_recognition_v1',
+        'audio_pipeline_v1',
+    }
+    default_pipelines = [
+        'image_pipeline_dynamic_v4',
+        'video_pipeline_dynamic_v4',
+        'audio_pipeline_v4',
+    ]
+    next_active_pipelines = [pipeline for pipeline in active_pipelines if pipeline not in legacy_builtin_pipelines]
+    for pipeline in default_pipelines:
+        if pipeline not in next_active_pipelines:
+            next_active_pipelines.append(pipeline)
+    updated = next_active_pipelines != active_pipelines
+    if updated:
+        config_data['active_pipelines'] = next_active_pipelines
+    if config_data.get('default_image_pipeline') != 'image_pipeline_dynamic_v4':
+        config_data['default_image_pipeline'] = 'image_pipeline_dynamic_v4'
         updated = True
-    if 'image_pipeline_dynamic_v3' not in active_pipelines:
-        active_pipelines.append('image_pipeline_dynamic_v3')
+    if config_data.get('default_video_pipeline') != 'video_pipeline_dynamic_v4':
+        config_data['default_video_pipeline'] = 'video_pipeline_dynamic_v4'
+        updated = True
+    if config_data.get('default_audio_pipeline') != 'audio_pipeline_v4':
+        config_data['default_audio_pipeline'] = 'audio_pipeline_v4'
         updated = True
     if updated:
-        config_data['active_pipelines'] = active_pipelines
         with open(config_path, 'w') as f:
             yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
 

@@ -105,6 +105,46 @@ def _aggregate_metrics(results, item_key):
     )
     return aggregate_metrics
 
+
+def _dedupe_names(names):
+    seen = set()
+    deduped = []
+    for name in names or []:
+        text = str(name or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _has_region_flow(pipeline_name):
+    pm = server_manager.pipeline_manager
+    if not pipeline_name or not pm.has_pipeline(pipeline_name):
+        return False
+    models = pm.dynamic_ai_manager.models
+    capabilities = pm.dynamic_ai_manager.model_capabilities
+    detector_names = capabilities.resolve_model_names_for_stage(pipeline_name, "detector", models) or []
+    region_names = capabilities.resolve_model_names_for_stage(pipeline_name, "region", models) or []
+    return bool(detector_names) and bool(region_names)
+
+
+async def _resolve_face_recognition_model_names(pipeline_name):
+    if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
+        await server_manager._ensure_pipelines_loaded(pipeline_name)
+    if not _has_region_flow(pipeline_name):
+        raise HTTPException(
+            status_code=501,
+            detail="Face recognition is not available. The required face recognition models are not active.",
+        )
+
+    pm = server_manager.pipeline_manager
+    models = pm.dynamic_ai_manager.models
+    capabilities = pm.dynamic_ai_manager.model_capabilities
+    detector_names = capabilities.resolve_model_names_for_stage(pipeline_name, "detector", models) or []
+    region_names = capabilities.resolve_model_names_for_stage(pipeline_name, "region", models) or []
+    return _dedupe_names(detector_names + region_names)
+
 logger = logging.getLogger("logger")
 
 @app.post("/process_images/")
@@ -113,7 +153,12 @@ async def process_images(request: ImagePathList):
         image_paths = request.paths
         logger.info(f"Processing {len(image_paths)} images")
         pipeline_name = request.pipeline_name or server_manager.default_image_pipeline
-        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
+        futures = [
+            await server_manager.get_request_future(
+                [path, request.threshold, request.return_confidence, None, None], pipeline_name,
+            )
+            for path in image_paths
+        ]
         results = await asyncio.gather(*futures, return_exceptions=True)
 
         for i, result in enumerate(results):
@@ -154,7 +199,7 @@ async def process_video(request: VideoPathList):
                 return VideoResult(result=return_result)
             else:
                 # We need to run models, skip ones that aren't needed, and then add to the video_result instead of overwriting it
-                data = [request.path, request.returnTimestamps, request.frame_interval, request.threshold, request.return_confidence, request.vr_video, video_result, skipped_categories]
+                data = [request.path, request.returnTimestamps, request.frame_interval, request.threshold, request.return_confidence, request.vr_video, skipped_categories, None]
 
         try:
             timeout = _get_request_timeout()
@@ -178,9 +223,9 @@ async def process_video_v3(request: VideoRequestV3):
     try:
         logger.info(f"Processing video in v3 at path: {request.path}")
 
-        pipeline_name = "video_pipeline_dynamic_v3"
+        pipeline_name = server_manager.default_video_pipeline
         
-        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip]
+        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip, None]
 
         result = None
         try:
@@ -204,10 +249,15 @@ async def process_images_v3(request: ImageRequestV3):
     try:
         image_paths = request.paths
         logger.info(f"Processing {len(image_paths)} images")
-        pipeline_name = "image_pipeline_dynamic_v3"
+        pipeline_name = server_manager.default_image_pipeline
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
         timeout = _get_request_timeout()
-        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
+        futures = [
+            await server_manager.get_request_future(
+                [path, request.threshold, request.return_confidence, None, None], pipeline_name,
+            )
+            for path in image_paths
+        ]
         if timeout > 0:
             results = await asyncio.gather(*[_await_with_timeout(f, timeout) for f in futures], return_exceptions=True)
         else:
@@ -265,15 +315,16 @@ async def process_images_face_recognition(request: ImageRequestV3):
     try:
         image_paths = request.paths
         logger.info(f"Processing {len(image_paths)} images (face recognition only)")
-        pipeline_name = "image_pipeline_face_embeddings_v1"
-        if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
-            raise HTTPException(
-                status_code=501,
-                detail="Face recognition is not available. The required face recognition models are not active.",
-            )
+        pipeline_name = server_manager.default_image_pipeline
+        requested_model_names = await _resolve_face_recognition_model_names(pipeline_name)
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
         timeout = _get_request_timeout()
-        futures = [await server_manager.get_request_future([path, request.threshold, request.return_confidence, None], pipeline_name) for path in image_paths]
+        futures = [
+            await server_manager.get_request_future(
+                [path, request.threshold, request.return_confidence, None, requested_model_names], pipeline_name,
+            )
+            for path in image_paths
+        ]
         if timeout > 0:
             results = await asyncio.gather(*[_await_with_timeout(f, timeout) for f in futures], return_exceptions=True)
         else:
@@ -304,7 +355,7 @@ async def process_images_face_recognition(request: ImageRequestV3):
             else:
                 results[i] = result
 
-        models = pipeline.get_ai_models_info()
+        models = filter_pipeline_models(pipeline, requested_model_names)
         aggregate_metrics["ai_model_count"] = len(models)
         aggregate_metrics["total_runtime_seconds"] = (
             aggregate_metrics["preprocess_seconds"] + aggregate_metrics["ai_inference_seconds"]
@@ -331,14 +382,10 @@ async def process_video_face_recognition(request: VideoRequestV3):
     try:
         logger.info(f"Processing video (face recognition only) at path: {request.path}")
 
-        pipeline_name = "video_pipeline_face_recognition_v1"
-        if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
-            raise HTTPException(
-                status_code=501,
-                detail="Face recognition is not available. The required face recognition models are not active.",
-            )
+        pipeline_name = server_manager.default_video_pipeline
+        requested_model_names = await _resolve_face_recognition_model_names(pipeline_name)
 
-        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip]
+        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip, requested_model_names]
 
         result = None
         try:
@@ -360,7 +407,7 @@ async def process_video_face_recognition(request: VideoRequestV3):
 @app.get("/v3/current_ai_models/")
 async def get_current_video_ai_models():
     try:
-        pipeline_name = "video_pipeline_dynamic_v3"
+        pipeline_name = server_manager.default_video_pipeline
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
         ai_models = pipeline.get_ai_models_info()
         return ai_models
@@ -411,11 +458,11 @@ async def get_capabilities():
 
         capabilities = {
             "face_recognition": (
-                pm.has_pipeline("image_pipeline_face_embeddings_v1")
-                or pm.has_pipeline("video_pipeline_face_recognition_v1")
+                _has_region_flow(server_manager.default_image_pipeline)
+                or _has_region_flow(server_manager.default_video_pipeline)
             ),
-            "image_tagging": pm.has_pipeline("image_pipeline_dynamic_v3"),
-            "video_tagging": pm.has_pipeline("video_pipeline_dynamic_v3"),
+            "image_tagging": pm.has_pipeline(server_manager.default_image_pipeline),
+            "video_tagging": pm.has_pipeline(server_manager.default_video_pipeline),
             "visual_embeddings": any(
                 "embedding" in set(getattr(m.model, "model_capabilities", []) or [])
                 for m in pm.model_manager.models.values()
@@ -584,7 +631,7 @@ async def process_images_v4(request: ImageRequestV4):
             default_scope="asset",
             load_policy=request.load_policy,
         )
-        pipeline_name = request.pipeline_name or "image_pipeline_dynamic_v4"
+        pipeline_name = request.pipeline_name or server_manager.default_image_pipeline
         timeout = _get_request_timeout()
         futures = [
             await server_manager.get_request_future(
@@ -629,7 +676,7 @@ async def process_video_v4(request: VideoRequestV4):
             default_scope="frame",
             load_policy=request.load_policy,
         )
-        pipeline_name = request.pipeline_name or "video_pipeline_dynamic_v4"
+        pipeline_name = request.pipeline_name or server_manager.default_video_pipeline
         timeout = _get_request_timeout()
         future = await server_manager.get_request_future(
             [
@@ -671,7 +718,7 @@ async def process_audio_v4(request: AudioRequestV4):
             default_scope="asset",
             load_policy=request.load_policy,
         )
-        pipeline_name = request.pipeline_name or "audio_pipeline_v4"
+        pipeline_name = request.pipeline_name or server_manager.default_audio_pipeline
         if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
             raise HTTPException(
                 status_code=501,
@@ -722,7 +769,7 @@ async def process_audio(request: AudioRequest):
     try:
         audio_paths = request.paths
         logger.info(f"Processing {len(audio_paths)} audio files")
-        pipeline_name = "audio_pipeline_v1"
+        pipeline_name = server_manager.default_audio_pipeline
         if not server_manager.pipeline_manager.has_pipeline(pipeline_name):
             raise HTTPException(
                 status_code=501,
@@ -731,7 +778,7 @@ async def process_audio(request: AudioRequest):
         timeout = _get_request_timeout()
         futures = [
             await server_manager.get_request_future(
-                [path, request.threshold], pipeline_name
+                [path, request.threshold, None], pipeline_name
             )
             for path in audio_paths
         ]

@@ -174,22 +174,28 @@ def resolve_want_model_names(server_manager, want, default_scope):
 
         requested_capabilities = set(_normalize_string_list(getattr(item, "capability", None)) or [])
         requested_capabilities.update(_normalize_string_list(getattr(item, "capabilities", None)) or [])
+        requested_categories = set(_normalize_string_list(getattr(item, "category", None)) or [])
+        requested_categories.update(_normalize_string_list(getattr(item, "categories", None)) or [])
+        requested_categories.update(_normalize_string_list(getattr(item, "model_category", None)) or [])
         requested_scopes = set(_normalize_string_list(getattr(item, "scope", None)) or [])
         requested_scopes.update(_normalize_string_list(getattr(item, "scopes", None)) or [])
         if not requested_scopes and default_scope:
             requested_scopes.add(default_scope)
 
         matched = []
-        if requested_capabilities or requested_scopes:
+        if requested_capabilities or requested_categories or requested_scopes:
             for entry in catalog:
                 if requested_capabilities and requested_capabilities.isdisjoint(entry["capabilities"]):
+                    continue
+                if requested_categories and requested_categories.isdisjoint(entry["categories"]):
                     continue
                 if requested_scopes and requested_scopes.isdisjoint(entry["supported_scopes"]):
                     continue
                 matched.append(entry["config_name"])
             if not matched and not explicit_models:
                 raise ValueError(
-                    f"No models matched want item capabilities={sorted(requested_capabilities)} scopes={sorted(requested_scopes)}"
+                    f"No models matched want item capabilities={sorted(requested_capabilities)} "
+                    f"categories={sorted(requested_categories)} scopes={sorted(requested_scopes)}"
                 )
             requested_model_names.extend(matched)
 

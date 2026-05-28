@@ -71,6 +71,8 @@ class ServerManager:
             self.logger.error("No default video pipeline found in the configuration file.")
             raise ServerStopException("No default video pipeline found in the configuration file.")
 
+        self.default_audio_pipeline = config.get("default_audio_pipeline", "audio_pipeline_v4")
+
     async def startup(self):
         pipelines = self.config["active_pipelines"]
         if not pipelines:

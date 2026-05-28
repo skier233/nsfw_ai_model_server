@@ -6,30 +6,42 @@ import yaml
 model_capabilities_yaml_path = "./config/model_capabilities.yaml"
 
 
+_DEFAULT_FACE_REGION_FLOW = {
+    "detector_models": [
+        {
+            "capabilities": ["detection"],
+            "categories": ["face_detections"],
+        },
+    ],
+    "region_models": [
+        {
+            "detector": {
+                "capabilities": ["detection"],
+                "categories": ["face_detections"],
+            },
+            "models": [
+                {
+                    "capabilities": ["embedding"],
+                    "categories": ["face_embeddings"],
+                    "scopes": ["region"],
+                },
+            ],
+        },
+    ],
+}
+
+
 DEFAULT_MODEL_CAPABILITIES_CONFIG = {
-    "image_pipeline_dynamic_v3": {
+    "image_pipeline_dynamic_v4": {
         "full_image_models": "ALL",
-        "detector_models": [],
-        "region_models": {},
+        **copy.deepcopy(_DEFAULT_FACE_REGION_FLOW),
     },
-    "video_pipeline_dynamic_v3": {
+    "video_pipeline_dynamic_v4": {
         "full_image_models": "ALL",
-        "detector_models": [],
-        "region_models": {},
+        **copy.deepcopy(_DEFAULT_FACE_REGION_FLOW),
     },
-    "image_pipeline_face_embeddings_v1": {
-        "full_image_models": [],
-        "detector_models": ["face_detector_torchexport"],
-        "region_models": {
-            "face_detector_torchexport": ["face_embedding_torchexport"],
-        },
-    },
-    "video_pipeline_face_recognition_v1": {
-        "full_image_models": [],
-        "detector_models": ["face_detector_torchexport"],
-        "region_models": {
-            "face_detector_torchexport": ["face_embedding_torchexport"],
-        },
+    "audio_pipeline_v4": {
+        "audio_models": "ALL",
     },
 }
 

@@ -183,3 +183,4 @@ logs/
 *.log
 
 /github wiki/
+/models/*

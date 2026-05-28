@@ -1,5 +1,5 @@
 from typing import Any, Dict, List
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from lib.model.postprocessing import tag_models
 
@@ -34,8 +34,13 @@ class ImageRequestV3(BaseModel):
 
 
 class AnalyzeWantV4(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     capability: str | None = None
     capabilities: List[str] | None = None
+    category: str | None = None
+    categories: List[str] | None = None
+    model_category: str | None = None
     scope: str | None = None
     scopes: List[str] | None = None
     models: List[str] | None = None
