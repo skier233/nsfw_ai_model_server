@@ -1,0 +1,2 @@
+type: python
+function_name: detector_result_to_region_targets

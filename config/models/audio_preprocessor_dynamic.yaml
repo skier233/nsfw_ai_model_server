@@ -1,0 +1,21 @@
+type: audio_preprocessor
+max_queue_size: null
+max_batch_size: 1
+instance_count: 1
+max_pending_items: 32
+
+# Vocal separation (Demucs)
+enable_separation: true
+separator_model: htdemucs
+
+# Windowing — overlapping windows extracted from vocal regions
+window_sec: 4.0
+hop_sec: 2.0
+min_window_sec: 1.0
+
+# Energy VAD
+energy_floor_db: -60.0
+adaptive_percentile: 25.0
+min_speech_ms: 100
+min_silence_ms: 150
+pad_ms: 80
