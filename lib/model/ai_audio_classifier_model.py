@@ -61,8 +61,9 @@ class AIAudioClassifierModel(AIModel):
 
             batch = torch.stack(padded, dim=0)  # [B, n_mels, T]
             batch = batch.to(self.device)
-            if batch.dtype != torch.float16:
-                batch = batch.half()
+            target_dtype = self.inference_dtype or torch.float16
+            if batch.dtype != target_dtype:
+                batch = batch.to(dtype=target_dtype)
 
             with torch.no_grad():
                 logits = self.model.run_raw(batch)

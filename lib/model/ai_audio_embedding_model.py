@@ -60,10 +60,12 @@ class AIAudioEmbeddingModel(AIModel):
             batch = torch.stack(padded, dim=0)
             batch = batch.to(self.device)
 
-            # The exported audio embedding graph runs in float32 - bypass PythonModel.run_raw()
-            # which would convert input to half and break the float32 graph.
+            target_dtype = self.inference_dtype or torch.float32
+            if batch.dtype != target_dtype:
+                batch = batch.to(dtype=target_dtype)
+
             with torch.no_grad():
-                embeddings = self.model.model(batch)
+                embeddings = self.model.run_raw(batch)
 
             if isinstance(embeddings, torch.Tensor):
                 embeddings = embeddings.cpu().numpy()

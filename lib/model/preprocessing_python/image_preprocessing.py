@@ -34,6 +34,30 @@ _DEFFCODE_LOG_FILTER = None
 _DEFFCODE_DECODER = None
 _LOGGER = logging.getLogger(__name__)
 
+
+# libav decode errors that are transient when seeking: a seek can land mid-GOP
+# and the decoder gets fed packets before the next keyframe, which
+# avcodec_send_packet() rejects with AVERROR_INVALIDDATA.  libav recovers at
+# the next keyframe, so these should be skipped rather than aborting the whole
+# video (which previously surfaced as a 400 on /analyze/video).
+_AV_RECOVERABLE_ERRNOS = frozenset({
+    1094995529,  # AVERROR_INVALIDDATA ("Invalid data found when processing input")
+})
+
+
+def _is_recoverable_av_error(exc: BaseException) -> bool:
+    """Return True for transient libav decode errors worth skipping past."""
+    if getattr(exc, "errno", None) in _AV_RECOVERABLE_ERRNOS:
+        return True
+    try:
+        import av
+        invalid = getattr(av.error, "InvalidDataError", ())
+        if invalid and isinstance(exc, invalid):
+            return True
+    except Exception:
+        pass
+    return False
+
 def _ensure_deffcode_log_filter() -> None:
     global _DEFFCODE_LOG_FILTER
     if _DEFFCODE_LOG_FILTER is not None:
@@ -999,7 +1023,11 @@ def preprocess_video_av_seek(
     container = av.open(str(video_path))
     try:
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        # Single-threaded decode for the seek backend.  We decode ~1 frame per
+        # seek, so frame threading buys nothing here, and its cross-frame
+        # pipeline state is fragile across seeks — a known source of spurious
+        # AVERROR_INVALIDDATA from avcodec_send_packet() right after a seek.
+        stream.thread_type = "NONE"
         average_rate = float(stream.average_rate) if stream.average_rate else 30.0
         frame_tolerance = 0.5 / average_rate if average_rate > 0 else 0.02
 
@@ -1026,41 +1054,87 @@ def preprocess_video_av_seek(
         prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
         prefetch_error: list = []  # mutable container for thread exception
 
+        codec_ctx = stream.codec_context
+
+        # When a seek lands on a bad/non-decodable keyframe (broken seek index
+        # or an open-GOP / discontinuity boundary), seeking directly to it and
+        # decoding raises AVERROR_INVALIDDATA.  Re-seeking to an *earlier*
+        # keyframe and decoding forward walks through the trouble spot (libav
+        # conceals it) and still lands on the target frame — so we keep the
+        # speed of seeking and only pay a little extra decode in bad regions.
+        # Values are seconds of backoff before the target.
+        _SEEK_BACKOFF_STEPS = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0)
+        _backoff_hint = [0.0]  # last backoff that worked, tried first next time
+
+        def _grab_frame_at(target_t):
+            """Return a decoded frame at/just after *target_t*, or None.
+
+            Tries the last-known-good backoff first, then the rest of the
+            schedule, seeking progressively earlier and decoding forward to
+            the target.  Returns None only if every attempt failed or the
+            stream is exhausted.
+            """
+            min_frame_time = max(target_t - frame_tolerance, 0.0)
+            hint = _backoff_hint[0]
+            order = [hint] + [s for s in _SEEK_BACKOFF_STEPS if s != hint]
+            last_exc = None
+            for backoff in order:
+                seek_t = max(target_t - backoff, 0.0)
+                try:
+                    container.seek(int(seek_t / time_base), stream=stream,
+                                   backward=True, any_frame=False)
+                    with suppress(Exception):
+                        codec_ctx.flush_buffers()
+                    frame = None
+                    last_frame = None
+                    for f in container.decode(video=0):
+                        last_frame = f
+                        ft = float(f.time) if f.time is not None else None
+                        if ft is None and f.pts is not None:
+                            ft = float(f.pts * time_base)
+                        if ft is None or ft >= min_frame_time:
+                            frame = f
+                            break
+                    _backoff_hint[0] = backoff
+                    return frame if frame is not None else last_frame
+                except Exception as exc:
+                    if _is_recoverable_av_error(exc):
+                        last_exc = exc
+                        continue  # try an earlier keyframe
+                    raise
+            if last_exc is not None:
+                _LOGGER.warning(
+                    "av_seek: no decodable frame near t=%.3fs after %d backoff "
+                    "attempts (%s); skipping.",
+                    target_t, len(_SEEK_BACKOFF_STEPS), last_exc,
+                )
+            return None
+
         def _prefetch_worker():
             """Seek-decode loop that feeds *prefetch_q* with raw numpy frames."""
             try:
                 idx = 0
                 t = 0.0
+                empty_streak = 0
                 while t < duration:
-                    target_pts = int(t / time_base)
-                    container.seek(target_pts, stream=stream)
-
-                    frame = None
-                    last_frame = None
-                    min_frame_time = max(t - frame_tolerance, 0.0)
-                    for f in container.decode(video=0):
-                        last_frame = f
-                        frame_time = float(f.time) if f.time is not None else None
-                        if frame_time is None and f.pts is not None:
-                            frame_time = float(f.pts * time_base)
-                        if frame_time is None or frame_time >= min_frame_time:
-                            frame = f
+                    frame = _grab_frame_at(t)
+                    if frame is None:
+                        # Either a transient undecodable spot (skip and advance)
+                        # or genuine end-of-stream.  Guard against spinning to
+                        # the end of a long file when the tail is unreadable.
+                        empty_streak += 1
+                        if empty_streak > 256:
                             break
-                    if frame is None:
-                        frame = last_frame
-                    if frame is None:
-                        break
+                        t += frame_interval
+                        continue
+                    empty_streak = 0
 
                     # All C-level / GIL-free work:
                     frame_np = frame.to_ndarray(format="rgb24")
                     if _mdle > 0:
                         frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
 
-                    if use_timestamps:
-                        out_idx = t
-                    else:
-                        out_idx = idx
-
+                    out_idx = t if use_timestamps else idx
                     prefetch_q.put((out_idx, frame_np))  # blocks if queue is full
                     idx += 1
                     t += frame_interval

@@ -70,6 +70,9 @@ class AIFaceEmbeddingModel(AIModel):
         image_quality = _estimate_face_image_quality(image)
         input_tensor = (image - 127.5) / 127.5
         input_tensor = input_tensor.to(self.device)
+        target_dtype = self.inference_dtype or torch.float16
+        if input_tensor.dtype != target_dtype:
+            input_tensor = input_tensor.to(dtype=target_dtype)
 
         # Run through secure ModelRunner — model never exposed
         outputs = self.model.run_raw_multi_output(input_tensor)

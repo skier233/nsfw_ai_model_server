@@ -48,6 +48,7 @@ class AIFaceDetectionModel(AIModel):
             det_thresh=float(threshold),
             nms_thresh=self.det_nms_thresh,
             device=self.device,
+            input_dtype=self.inference_dtype,
         )
 
         output = []
@@ -139,7 +140,7 @@ def nms(dets, thresh):
     return keep
 
 
-def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thresh=0.4, device="cpu"):
+def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thresh=0.4, device="cpu", input_dtype=None):
     img_t = img.detach() if isinstance(img, torch.Tensor) else img
     rgb_tensor = img_t if img_t.dtype == torch.float32 else img_t.float()
     if rgb_tensor.dim() == 4:
@@ -170,6 +171,8 @@ def run_detection(det_model, img, det_size=(640, 640), det_thresh=0.5, nms_thres
     canvas = torch.zeros((3, det_size[1], det_size[0]), dtype=torch.float32, device=rgb_tensor.device)
     canvas[:, :new_height, :new_width] = resized
     input_tensor = ((canvas - 127.5) / 128.0).unsqueeze(0).to(device)
+    if input_dtype is not None and input_tensor.dtype != input_dtype:
+        input_tensor = input_tensor.to(dtype=input_dtype)
     outputs = _run_module(det_model, input_tensor)
 
     fmc, feat_strides, num_anchors, use_kps = _scrfd_meta(len(outputs))
