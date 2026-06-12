@@ -13,6 +13,8 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video_deffcode_auto,
     preprocess_video_av,
     preprocess_video_av_seek,
+    preprocess_video_av_sequential,
+    probe_keyframe_interval_seconds,
 )
 from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec
 
@@ -70,7 +72,7 @@ class VideoPreprocessorModel(Model):
         elif requested_backend == "av_auto":
             self._preprocess_backend = "av_auto"
             self._preprocess_callable = preprocess_video_av_seek  # default; overridden per-request
-            self.logger.info("Video preprocessor using PyAV auto backend (seek when interval >= 1s, threaded otherwise)")
+            self.logger.info("Video preprocessor using PyAV auto backend (GOP-aware: sequential decode when frame_interval <= GOP, seek otherwise)")
         elif requested_backend == "deffcode_gpu":
             if not torch.cuda.is_available():
                 self.logger.warning(
@@ -116,14 +118,35 @@ class VideoPreprocessorModel(Model):
                 preprocess_callable = self._preprocess_callable
                 backend_used = self._preprocess_backend
 
-                # av_auto: pick seek vs threaded based on frame_interval
+                # av_auto: pick sequential decode vs seek based on how the
+                # requested frame_interval compares to the video's GOP.
+                #
+                # Seeking only pays off when the interval is large enough to
+                # skip whole GOPs; when it is smaller than the GOP, the seek
+                # backend re-decodes the GOP prefix for every target frame
+                # (e.g. a 2 s interval on an 8 s-GOP video re-decodes the same
+                # packets ~4x).  Sequential decode touches each frame once, so
+                # it wins whenever frame_interval <= GOP.
                 if backend_used == "av_auto":
-                    if frame_interval < 1.0:
-                        preprocess_callable = preprocess_video_av
-                        backend_used = "av"
+                    gop_seconds = probe_keyframe_interval_seconds(input_data)
+                    if gop_seconds is not None and gop_seconds > 0:
+                        use_sequential = frame_interval <= gop_seconds
+                    else:
+                        # GOP unknown: sequential is safe for typical sampling
+                        # rates; only switch to seeking for sparse sampling.
+                        use_sequential = frame_interval <= 4.0
+                    if use_sequential:
+                        preprocess_callable = preprocess_video_av_sequential
+                        backend_used = "av_sequential"
                     else:
                         preprocess_callable = preprocess_video_av_seek
                         backend_used = "av_seek"
+                    self.logger.info(
+                        "av_auto: frame_interval=%.3fs gop=%s → %s backend",
+                        frame_interval,
+                        f"{gop_seconds:.3f}s" if gop_seconds else "unknown",
+                        backend_used,
+                    )
 
                 # Determine the max decode resolution from the specs.
                 # If every spec has a finite cap we can let ffmpeg downscale

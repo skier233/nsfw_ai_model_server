@@ -419,6 +419,49 @@ def _target_fps(frame_interval: float) -> Optional[float]:
     return max(1.0 / frame_interval, 0.001)
 
 
+def probe_keyframe_interval_seconds(
+    video_path,
+    max_keyframes: int = 3,
+    max_packets: int = 6000,
+) -> Optional[float]:
+    """Return the median keyframe (GOP) spacing in seconds, or ``None``.
+
+    Demuxes packets *without decoding* — cheap (a few hundred packets, ~tens of
+    ms) — and measures the time between the first few keyframes.  Used to choose
+    between sequential decoding and seeking: when the requested frame interval is
+    smaller than the GOP, seeking re-decodes the GOP prefix for every target
+    frame, so sequential decode-once is far cheaper.
+    """
+    try:
+        import av
+
+        with av.open(str(video_path)) as container:
+            stream = container.streams.video[0]
+            time_base = stream.time_base
+            if time_base is None:
+                return None
+            keyframe_times: list[float] = []
+            packets_seen = 0
+            for packet in container.demux(stream):
+                packets_seen += 1
+                if packet.is_keyframe and packet.pts is not None:
+                    keyframe_times.append(float(packet.pts * time_base))
+                    if len(keyframe_times) >= max_keyframes + 1:
+                        break
+                if packets_seen >= max_packets:
+                    break
+        diffs = sorted(
+            keyframe_times[i + 1] - keyframe_times[i]
+            for i in range(len(keyframe_times) - 1)
+            if keyframe_times[i + 1] > keyframe_times[i]
+        )
+        if diffs:
+            return diffs[len(diffs) // 2]
+    except Exception as exc:
+        _LOGGER.debug("Keyframe interval probe failed for '%s': %s", video_path, exc)
+    return None
+
+
 def _format_ffmpeg_float(value: float) -> str:
     text = f"{value:.12f}"
     text = text.rstrip("0").rstrip(".")
@@ -1161,6 +1204,137 @@ def preprocess_video_av_seek(
         finally:
             # Drain the queue so the worker thread isn't blocked on put()
             # and can terminate cleanly.
+            while worker.is_alive():
+                try:
+                    prefetch_q.get_nowait()
+                except queue.Empty:
+                    break
+            worker.join(timeout=2.0)
+    finally:
+        container.close()
+
+
+def preprocess_video_av_sequential(
+    video_path,
+    frame_interval=0.5,
+    img_size=512,
+    use_half_precision=True,
+    device=None,
+    use_timestamps=False,
+    vr_video=False,
+    norm_config=1,
+    max_decode_long_edge=0,
+    **_kwargs,
+):
+    """Preprocess video by decoding the stream once and emitting the frame
+    nearest each target timestamp.
+
+    Unlike the seek backend, this never re-seeks, so every frame in the file is
+    decoded at most once.  This is dramatically faster than seeking whenever the
+    requested ``frame_interval`` is smaller than the video's GOP/keyframe
+    interval: the seek backend re-decodes the GOP prefix for *every* target
+    frame, so e.g. a 2 s interval on an 8 s-GOP video re-decodes the same
+    packets ~4x.  Frame selection matches the seek backend (the first frame
+    whose timestamp is >= the target), so analysis results are unchanged.
+
+    A background thread runs the GIL-free decode/convert work so it overlaps
+    with the consumer's torch transforms and downstream GPU inference.
+    """
+    import av
+
+    video_path = _validate_local_video_source(video_path)
+    if device:
+        device = torch.device(device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    mean, std = get_normalization_config(norm_config, device)
+    frame_transforms = get_frame_transforms(
+        use_half_precision,
+        mean,
+        std,
+        vr_video=vr_video,
+        img_size=img_size,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
+    )
+
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+
+    container = av.open(str(video_path))
+    try:
+        stream = container.streams.video[0]
+        # Frame/slice threading accelerates sequential software decode.
+        stream.thread_type = "AUTO"
+        time_base = stream.time_base
+        average_rate = float(stream.average_rate) if stream.average_rate else 30.0
+        frame_tolerance = 0.5 / average_rate if average_rate > 0 else 0.02
+
+        if not frame_interval or frame_interval <= 0:
+            frame_interval = 1.0 / average_rate
+
+        # ---- prefetch machinery (mirrors the seek backend) ----
+        # The background thread runs only GIL-free C-level work: decode,
+        # to_ndarray, and optional resize.  Torch work stays on the consumer.
+        _PREFETCH_DEPTH = 16
+        _SENTINEL = None
+        prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+        prefetch_error: list = []
+        stop_event = threading.Event()
+
+        def _prefetch_worker():
+            try:
+                emit_count = 0
+                next_t = 0.0
+                for frame in container.decode(video=0):
+                    if stop_event.is_set():
+                        break
+                    ft = float(frame.time) if frame.time is not None else None
+                    if ft is None and frame.pts is not None and time_base is not None:
+                        ft = float(frame.pts * time_base)
+                    if ft is None:
+                        # No timestamp — fall back to positional emission.
+                        ft = next_t
+                    if ft + frame_tolerance < next_t:
+                        # Before the next target — decoded (unavoidable) but
+                        # not needed downstream, so skip the convert/emit.
+                        continue
+
+                    frame_np = frame.to_ndarray(format="rgb24")
+                    if _mdle > 0:
+                        frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
+
+                    out_idx = next_t if use_timestamps else emit_count
+                    prefetch_q.put((out_idx, frame_np))  # blocks if queue full
+                    emit_count += 1
+                    next_t += frame_interval
+                    # Sub-frame intervals: keep the target ahead of the current
+                    # frame so we don't re-emit the same frame repeatedly.
+                    if next_t <= ft:
+                        next_t = ft + frame_interval
+            except Exception as exc:
+                prefetch_error.append(exc)
+            finally:
+                prefetch_q.put(_SENTINEL)
+
+        worker = threading.Thread(target=_prefetch_worker, daemon=True)
+        worker.start()
+
+        try:
+            while True:
+                item = prefetch_q.get()
+                if item is _SENTINEL:
+                    if prefetch_error:
+                        raise prefetch_error[0]
+                    return
+                out_idx, frame_np = item
+                # Torch work runs on the consumer thread — no GIL contention
+                # with the prefetch thread's C-level decode.
+                result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
+                yield (out_idx, result)
+        finally:
+            # Signal the worker to stop and drain so it isn't blocked on put().
+            stop_event.set()
             while worker.is_alive():
                 try:
                     prefetch_q.get_nowait()
