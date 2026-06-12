@@ -18,7 +18,7 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video_mp_pyav,
     probe_keyframe_interval_seconds,
 )
-from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec
+from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec, apply_spec_batch
 
 
 class VideoPreprocessorModel(Model):
@@ -67,6 +67,12 @@ class VideoPreprocessorModel(Model):
         # saturates memory bandwidth on typical multi-core boxes).
         _workers = configValues.get("decode_workers", 0)
         self._decode_workers = int(_workers) if _workers else min(8, os.cpu_count() or 4)
+
+        # How many frames to resize/normalize per batched GPU call.  Larger =
+        # fewer GIL-held dispatches (better decode/inference overlap) at the cost
+        # of more transient VRAM for the in-flight batch.
+        _pbs = configValues.get("preprocess_batch_size", 32)
+        self._preprocess_batch_size = max(1, int(_pbs) if _pbs else 32)
 
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
@@ -251,38 +257,45 @@ class VideoPreprocessorModel(Model):
                 _requested_model_names = itemFuture[item.input_names[7]] if len(item.input_names) > 7 else None
 
                 def _frame_producer():
-                    # Build CPU-only variants of specs so that apply_spec
-                    # never touches the GPU.  Individual H2D transfers per
-                    # frame on the default CUDA stream serialize with GPU
-                    # inference and cause the spiky utilisation pattern.
-                    # Keeping everything on CPU lets the batched inference
-                    # step do a single large H2D copy instead.
-                    from dataclasses import replace as _dc_replace
-                    _specs = [
-                        _dc_replace(sp, device="cpu") if sp.device != "cpu" else sp
-                        for sp in self.specs
-                    ]
+                    # Apply each spec on its native device, in batches.  A batch
+                    # is one H2D copy + a few resize/normalize kernels per N
+                    # frames, instead of a CPU resize+normalize per frame.  The
+                    # per-frame variant holds the GIL the whole time and
+                    # ping-pongs with the async inference pipeline; batching
+                    # pushes that work onto the (idle) GPU in a handful of
+                    # dispatches, so decode and inference actually overlap.
+                    _specs = list(self.specs)
                     _out_names = item.output_names
                     _ss = spec_start
+                    _batch = []  # list of (frame_index, raw_frame CHW)
+
+                    def _flush():
+                        if not _batch:
+                            return
+                        t0 = time.perf_counter()
+                        raws = torch.stack([rf for _, rf in _batch], dim=0)  # [N,C,H,W]
+                        spec_batches = [apply_spec_batch(raws, sp) for sp in _specs]
+                        del raws
+                        for bi, (fidx, _) in enumerate(_batch):
+                            st = {
+                                _out_names[_ss + si]: spec_batches[si][bi]
+                                for si in range(len(_specs))
+                            }
+                            _result_q.put((fidx, st))
+                        _cumulative_cpu[0] += time.perf_counter() - t0
+                        _batch.clear()
+
                     try:
                         while True:
                             try:
                                 frame_data = next(frame_iterator)
                             except StopIteration:
                                 break
-
-                            frame_index = frame_data[0]
-                            raw_frame = frame_data[1]
+                            _batch.append((frame_data[0], frame_data[1]))
                             del frame_data
-
-                            t0 = time.perf_counter()
-                            st = {}
-                            for i, sp in enumerate(_specs):
-                                st[_out_names[_ss + i]] = apply_spec(raw_frame, sp)
-                            del raw_frame
-                            _cumulative_cpu[0] += time.perf_counter() - t0
-
-                            _result_q.put((frame_index, st))
+                            if len(_batch) >= self._preprocess_batch_size:
+                                _flush()
+                        _flush()
                     except Exception as exc:
                         _producer_error.append(exc)
                     finally:

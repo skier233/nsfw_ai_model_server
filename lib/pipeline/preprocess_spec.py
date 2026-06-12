@@ -243,3 +243,75 @@ def apply_spec(source: torch.Tensor, spec: PreprocessSpec) -> torch.Tensor:
         t = t.to(spec.effective_dtype)
 
     return t
+
+
+def apply_spec_batch(source: torch.Tensor, spec: PreprocessSpec) -> torch.Tensor:
+    """Batched form of :func:`apply_spec` for an ``[N, C, H, W]`` source.
+
+    Produces an ``[N, C, Hs, Ws]`` tensor on the spec's target device.  For GPU
+    specs the batch is moved to the device *before* resizing, so a single H2D
+    copy serves the whole batch and the resize/normalize run as a handful of
+    batched GPU kernels — instead of one CPU resize + H2D per frame.  This keeps
+    the per-frame work off the Python GIL so video decode and inference overlap.
+
+    All frames in a batch must share the same H, W (true for one video).
+    """
+    t = source
+    if t.dim() != 4:
+        raise ValueError(f"apply_spec_batch expects [N, C, H, W]; got {tuple(t.shape)}")
+
+    target_device = (
+        torch.device("cpu") if spec.device == "cpu"
+        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    # Move the (pre-resize, hence smaller) batch to the target device up front.
+    if t.device != target_device:
+        t = t.to(target_device, non_blocking=(target_device.type == "cuda"))
+
+    h, w = t.shape[-2], t.shape[-1]
+    resized = False
+    interp_mode = "bicubic" if spec.interpolation == "bicubic" else "bilinear"
+
+    # 1. Resize -----------------------------------------------------------
+    if spec.width > 0 and spec.height > 0:
+        if spec.center_crop:
+            short_edge = min(h, w)
+            target_short = min(spec.width, spec.height)
+            if short_edge != target_short or h == w:
+                scale = target_short / short_edge
+                new_h = max(1, round(h * scale))
+                new_w = max(1, round(w * scale))
+                t = F.interpolate(t, size=(new_h, new_w), mode=interp_mode, align_corners=False)
+            ch, cw = t.shape[-2], t.shape[-1]
+            top = (ch - spec.height) // 2
+            left = (cw - spec.width) // 2
+            t = t[:, :, top : top + spec.height, left : left + spec.width]
+            resized = True
+        elif h != spec.height or w != spec.width:
+            t = F.interpolate(t, size=(spec.height, spec.width), mode=interp_mode, align_corners=False)
+            resized = True
+    elif spec.max_long_edge > 0:
+        long_edge = max(h, w)
+        if long_edge > spec.max_long_edge:
+            scale = spec.max_long_edge / long_edge
+            new_h = max(1, round(h * scale))
+            new_w = max(1, round(w * scale))
+            t = F.interpolate(t, size=(new_h, new_w), mode=interp_mode, align_corners=False)
+            resized = True
+
+    if not resized:
+        t = t.clone()
+
+    # 2. Normalize --------------------------------------------------------
+    if spec.normalization >= 0:
+        mean_list, std_list = NORMALIZATION_PRESETS[spec.normalization]
+        t = t / 255.0
+        mean = torch.tensor(mean_list, device=t.device, dtype=t.dtype).view(1, -1, 1, 1)
+        std = torch.tensor(std_list, device=t.device, dtype=t.dtype).view(1, -1, 1, 1)
+        t = (t - mean) / std
+
+    # 3. Precision --------------------------------------------------------
+    if spec.half_precision or spec.precision:
+        t = t.to(spec.effective_dtype)
+
+    return t

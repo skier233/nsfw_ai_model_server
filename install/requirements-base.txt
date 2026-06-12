@@ -17,3 +17,4 @@ pydantic==2.8.2
 pydantic_core==2.20.1
 soundfile==0.13.1
 av
+demucs
