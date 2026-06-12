@@ -426,11 +426,12 @@ def probe_keyframe_interval_seconds(
 ) -> Optional[float]:
     """Return the median keyframe (GOP) spacing in seconds, or ``None``.
 
-    Demuxes packets *without decoding* — cheap (a few hundred packets, ~tens of
-    ms) — and measures the time between the first few keyframes.  Used to choose
-    between sequential decoding and seeking: when the requested frame interval is
-    smaller than the GOP, seeking re-decodes the GOP prefix for every target
-    frame, so sequential decode-once is far cheaper.
+    Demuxes packets *without decoding* — cheap (a few hundred packets, tens of
+    ms) — and measures the time between the first few keyframes.  Used to decide
+    between true-interval parallel decode (when frame_interval < GOP, so seeking
+    would snap several targets onto the same keyframe → duplicates) and the seek
+    backend (when frame_interval >= GOP, where seeking lands distinct keyframes
+    cheaply).
     """
     try:
         import av
@@ -440,7 +441,7 @@ def probe_keyframe_interval_seconds(
             time_base = stream.time_base
             if time_base is None:
                 return None
-            keyframe_times: list[float] = []
+            keyframe_times: list = []
             packets_seen = 0
             for packet in container.demux(stream):
                 packets_seen += 1
@@ -632,6 +633,7 @@ def preprocess_video_deffcode(
     vr_video=False,
     norm_config=1,
     max_decode_long_edge=0,
+    **_kwargs,
 ):
     """
     Preprocess video using CPU-based DeFFcode with FFmpeg filtering.
@@ -1033,14 +1035,20 @@ def preprocess_video_av_seek(
 ):
     """Preprocess video using PyAV with seek-based frame extraction.
 
-    Instead of decoding every frame, this seeks to each target timestamp
-    and decodes only one frame per seek.  Much faster than full-decode
-    when ``frame_interval`` is large (>= 1 s) or the video is long,
-    because it skips most of the bitstream entirely.
+    For each target timestamp this seeks to the nearest preceding keyframe and
+    decodes a single frame.  Because it decodes ~1 frame per target instead of
+    walking the bitstream, it is dramatically faster than full decode whenever
+    ``frame_interval`` is >= ~1s — the cost per emitted frame is roughly
+    constant regardless of the interval or GOP size.
 
-    A background prefetch thread runs the seek loop ahead of the consumer
-    so that seek I/O overlaps with downstream GPU inference.  PyAV's
-    C-level seek/decode releases the GIL, making true concurrency possible.
+    Frames snap to the nearest keyframe at/before the target (rather than the
+    frame-exact timestamp); for AI sampling at 1-2s intervals this is the
+    intended, fast behaviour.  A recoverable libav decode error at a given
+    target is skipped rather than aborting the whole video.
+
+    A background prefetch thread runs the GIL-free C-level work (seek, decode,
+    to_ndarray, optional resize) so it overlaps with the consumer's torch
+    transforms and downstream GPU inference.
     """
     import av
 
@@ -1066,13 +1074,8 @@ def preprocess_video_av_seek(
     container = av.open(str(video_path))
     try:
         stream = container.streams.video[0]
-        # Single-threaded decode for the seek backend.  We decode ~1 frame per
-        # seek, so frame threading buys nothing here, and its cross-frame
-        # pipeline state is fragile across seeks — a known source of spurious
-        # AVERROR_INVALIDDATA from avcodec_send_packet() right after a seek.
-        stream.thread_type = "NONE"
-        average_rate = float(stream.average_rate) if stream.average_rate else 30.0
-        frame_tolerance = 0.5 / average_rate if average_rate > 0 else 0.02
+        # Frame threading accelerates the single keyframe decode per seek.
+        stream.thread_type = "AUTO"
 
         # Determine duration in seconds
         if stream.duration and stream.time_base:
@@ -1088,89 +1091,38 @@ def preprocess_video_av_seek(
         time_base = stream.time_base
 
         # ---- prefetch machinery ----
-        # The background thread runs ONLY the GIL-free C-level work:
-        # seek, decode, to_ndarray, and optional cv2 resize.  All
-        # Python/torch work (_prepare_frame) stays on the consumer side
-        # so it doesn't compete with model inference for the GIL.
+        # The background thread runs ONLY the GIL-free C-level work: seek,
+        # decode, to_ndarray, and optional resize.  All Python/torch work
+        # (_prepare_frame) stays on the consumer side so it doesn't compete
+        # with model inference for the GIL.
         _PREFETCH_DEPTH = 16
         _SENTINEL = None  # signals end-of-stream or error
         prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
         prefetch_error: list = []  # mutable container for thread exception
-
-        codec_ctx = stream.codec_context
-
-        # When a seek lands on a bad/non-decodable keyframe (broken seek index
-        # or an open-GOP / discontinuity boundary), seeking directly to it and
-        # decoding raises AVERROR_INVALIDDATA.  Re-seeking to an *earlier*
-        # keyframe and decoding forward walks through the trouble spot (libav
-        # conceals it) and still lands on the target frame — so we keep the
-        # speed of seeking and only pay a little extra decode in bad regions.
-        # Values are seconds of backoff before the target.
-        _SEEK_BACKOFF_STEPS = (0.0, 1.0, 2.0, 5.0, 10.0, 20.0)
-        _backoff_hint = [0.0]  # last backoff that worked, tried first next time
-
-        def _grab_frame_at(target_t):
-            """Return a decoded frame at/just after *target_t*, or None.
-
-            Tries the last-known-good backoff first, then the rest of the
-            schedule, seeking progressively earlier and decoding forward to
-            the target.  Returns None only if every attempt failed or the
-            stream is exhausted.
-            """
-            min_frame_time = max(target_t - frame_tolerance, 0.0)
-            hint = _backoff_hint[0]
-            order = [hint] + [s for s in _SEEK_BACKOFF_STEPS if s != hint]
-            last_exc = None
-            for backoff in order:
-                seek_t = max(target_t - backoff, 0.0)
-                try:
-                    container.seek(int(seek_t / time_base), stream=stream,
-                                   backward=True, any_frame=False)
-                    with suppress(Exception):
-                        codec_ctx.flush_buffers()
-                    frame = None
-                    last_frame = None
-                    for f in container.decode(video=0):
-                        last_frame = f
-                        ft = float(f.time) if f.time is not None else None
-                        if ft is None and f.pts is not None:
-                            ft = float(f.pts * time_base)
-                        if ft is None or ft >= min_frame_time:
-                            frame = f
-                            break
-                    _backoff_hint[0] = backoff
-                    return frame if frame is not None else last_frame
-                except Exception as exc:
-                    if _is_recoverable_av_error(exc):
-                        last_exc = exc
-                        continue  # try an earlier keyframe
-                    raise
-            if last_exc is not None:
-                _LOGGER.warning(
-                    "av_seek: no decodable frame near t=%.3fs after %d backoff "
-                    "attempts (%s); skipping.",
-                    target_t, len(_SEEK_BACKOFF_STEPS), last_exc,
-                )
-            return None
 
         def _prefetch_worker():
             """Seek-decode loop that feeds *prefetch_q* with raw numpy frames."""
             try:
                 idx = 0
                 t = 0.0
-                empty_streak = 0
                 while t < duration:
-                    frame = _grab_frame_at(t)
-                    if frame is None:
-                        # Either a transient undecodable spot (skip and advance)
-                        # or genuine end-of-stream.  Guard against spinning to
-                        # the end of a long file when the tail is unreadable.
-                        empty_streak += 1
-                        if empty_streak > 256:
+                    try:
+                        container.seek(int(t / time_base), stream=stream)
+                        frame = None
+                        for f in container.decode(video=0):
+                            frame = f
                             break
-                        t += frame_interval
-                        continue
-                    empty_streak = 0
+                    except Exception as exc:
+                        # A seek landing on a damaged/undecodable keyframe can
+                        # raise transient libav errors — skip this target and
+                        # advance rather than failing the whole video.
+                        if _is_recoverable_av_error(exc):
+                            idx += 1
+                            t += frame_interval
+                            continue
+                        raise
+                    if frame is None:
+                        break
 
                     # All C-level / GIL-free work:
                     frame_np = frame.to_ndarray(format="rgb24")
@@ -1178,6 +1130,7 @@ def preprocess_video_av_seek(
                         frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
 
                     out_idx = t if use_timestamps else idx
+
                     prefetch_q.put((out_idx, frame_np))  # blocks if queue is full
                     idx += 1
                     t += frame_interval
@@ -1197,7 +1150,7 @@ def preprocess_video_av_seek(
                         raise prefetch_error[0]
                     return
                 out_idx, frame_np = item
-                # Torch work runs on consumer thread — no GIL contention
+                # Torch work runs on the consumer thread — no GIL contention
                 # with the prefetch thread's C-level seeks.
                 result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
                 yield (out_idx, result)
@@ -1214,7 +1167,8 @@ def preprocess_video_av_seek(
         container.close()
 
 
-def preprocess_video_av_sequential(
+
+def preprocess_video_mp_pyav(
     video_path,
     frame_interval=0.5,
     img_size=512,
@@ -1224,23 +1178,22 @@ def preprocess_video_av_sequential(
     vr_video=False,
     norm_config=1,
     max_decode_long_edge=0,
+    decode_workers=None,
     **_kwargs,
 ):
-    """Preprocess video by decoding the stream once and emitting the frame
-    nearest each target timestamp.
+    """TRUE per-interval sampling via parallel PyAV decode in worker *processes*.
 
-    Unlike the seek backend, this never re-seeks, so every frame in the file is
-    decoded at most once.  This is dramatically faster than seeking whenever the
-    requested ``frame_interval`` is smaller than the video's GOP/keyframe
-    interval: the seek backend re-decodes the GOP prefix for *every* target
-    frame, so e.g. a 2 s interval on an 8 s-GOP video re-decodes the same
-    packets ~4x.  Frame selection matches the seek backend (the first frame
-    whose timestamp is >= the target), so analysis results are unchanged.
+    Each worker process decodes a contiguous time-chunk (own GIL), so the
+    decoders run in true parallel and don't contend with the parent process's
+    asyncio inference pipeline — the contention that throttles in-process
+    threaded PyAV decode.  Only small, already-downscaled frames cross the
+    process boundary.  Uses PyAV (bundled libav, no external binary), so it is
+    portable across user setups.
 
-    A background thread runs the GIL-free decode/convert work so it overlaps
-    with the consumer's torch transforms and downstream GPU inference.
+    Frames are produced out of timestamp order; each carries its target time and
+    the video preprocessor sorts children by frame_index before assembly.
     """
-    import av
+    from lib.model.preprocessing_python.mp_decode import iter_parallel_frames
 
     video_path = _validate_local_video_source(video_path)
     if device:
@@ -1248,98 +1201,21 @@ def preprocess_video_av_sequential(
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    if decode_workers is None or decode_workers <= 0:
+        decode_workers = min(8, os.cpu_count() or 4)
+
     mean, std = get_normalization_config(norm_config, device)
     frame_transforms = get_frame_transforms(
-        use_half_precision,
-        mean,
-        std,
-        vr_video=vr_video,
-        img_size=img_size,
+        use_half_precision, mean, std, vr_video=vr_video, img_size=img_size,
         apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
         scale_values=(norm_config != -1),
     )
-
     _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
 
-    container = av.open(str(video_path))
-    try:
-        stream = container.streams.video[0]
-        # Frame/slice threading accelerates sequential software decode.
-        stream.thread_type = "AUTO"
-        time_base = stream.time_base
-        average_rate = float(stream.average_rate) if stream.average_rate else 30.0
-        frame_tolerance = 0.5 / average_rate if average_rate > 0 else 0.02
-
-        if not frame_interval or frame_interval <= 0:
-            frame_interval = 1.0 / average_rate
-
-        # ---- prefetch machinery (mirrors the seek backend) ----
-        # The background thread runs only GIL-free C-level work: decode,
-        # to_ndarray, and optional resize.  Torch work stays on the consumer.
-        _PREFETCH_DEPTH = 16
-        _SENTINEL = None
-        prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
-        prefetch_error: list = []
-        stop_event = threading.Event()
-
-        def _prefetch_worker():
-            try:
-                emit_count = 0
-                next_t = 0.0
-                for frame in container.decode(video=0):
-                    if stop_event.is_set():
-                        break
-                    ft = float(frame.time) if frame.time is not None else None
-                    if ft is None and frame.pts is not None and time_base is not None:
-                        ft = float(frame.pts * time_base)
-                    if ft is None:
-                        # No timestamp — fall back to positional emission.
-                        ft = next_t
-                    if ft + frame_tolerance < next_t:
-                        # Before the next target — decoded (unavoidable) but
-                        # not needed downstream, so skip the convert/emit.
-                        continue
-
-                    frame_np = frame.to_ndarray(format="rgb24")
-                    if _mdle > 0:
-                        frame_np = _av_resize_frame_if_needed(frame_np, _mdle)
-
-                    out_idx = next_t if use_timestamps else emit_count
-                    prefetch_q.put((out_idx, frame_np))  # blocks if queue full
-                    emit_count += 1
-                    next_t += frame_interval
-                    # Sub-frame intervals: keep the target ahead of the current
-                    # frame so we don't re-emit the same frame repeatedly.
-                    if next_t <= ft:
-                        next_t = ft + frame_interval
-            except Exception as exc:
-                prefetch_error.append(exc)
-            finally:
-                prefetch_q.put(_SENTINEL)
-
-        worker = threading.Thread(target=_prefetch_worker, daemon=True)
-        worker.start()
-
-        try:
-            while True:
-                item = prefetch_q.get()
-                if item is _SENTINEL:
-                    if prefetch_error:
-                        raise prefetch_error[0]
-                    return
-                out_idx, frame_np = item
-                # Torch work runs on the consumer thread — no GIL contention
-                # with the prefetch thread's C-level decode.
-                result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
-                yield (out_idx, result)
-        finally:
-            # Signal the worker to stop and drain so it isn't blocked on put().
-            stop_event.set()
-            while worker.is_alive():
-                try:
-                    prefetch_q.get_nowait()
-                except queue.Empty:
-                    break
-            worker.join(timeout=2.0)
-    finally:
-        container.close()
+    # The decode (av) runs in child processes; the torch transform stays in this
+    # parent process where the rest of the pipeline lives.
+    for out_idx, frame_np in iter_parallel_frames(
+        video_path, frame_interval, _mdle, int(decode_workers), use_timestamps,
+    ):
+        result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
+        yield (out_idx, result)

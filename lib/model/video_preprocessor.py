@@ -1,5 +1,7 @@
 import asyncio
+import functools
 import logging
+import os
 import queue
 import threading
 import time
@@ -13,7 +15,7 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video_deffcode_auto,
     preprocess_video_av,
     preprocess_video_av_seek,
-    preprocess_video_av_sequential,
+    preprocess_video_mp_pyav,
     probe_keyframe_interval_seconds,
 )
 from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec
@@ -59,6 +61,13 @@ class VideoPreprocessorModel(Model):
         # video's longest edge is >= this threshold.  0 = always GPU.
         self._gpu_min_long_edge = int(configValues.get("gpu_min_long_edge", 3600))
 
+        # Number of parallel decode workers for true-interval (av_parallel)
+        # sampling.  Each worker decodes a contiguous time-chunk in its own
+        # PyAV container.  Default scales with CPU count (capped at 8, which
+        # saturates memory bandwidth on typical multi-core boxes).
+        _workers = configValues.get("decode_workers", 0)
+        self._decode_workers = int(_workers) if _workers else min(8, os.cpu_count() or 4)
+
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
         if requested_backend == "av":
@@ -72,7 +81,7 @@ class VideoPreprocessorModel(Model):
         elif requested_backend == "av_auto":
             self._preprocess_backend = "av_auto"
             self._preprocess_callable = preprocess_video_av_seek  # default; overridden per-request
-            self.logger.info("Video preprocessor using PyAV auto backend (GOP-aware: sequential decode when frame_interval <= GOP, seek otherwise)")
+            self.logger.info("Video preprocessor using PyAV auto backend (seek when interval >= 1s, threaded otherwise)")
         elif requested_backend == "deffcode_gpu":
             if not torch.cuda.is_available():
                 self.logger.warning(
@@ -118,26 +127,34 @@ class VideoPreprocessorModel(Model):
                 preprocess_callable = self._preprocess_callable
                 backend_used = self._preprocess_backend
 
-                # av_auto: pick sequential decode vs seek based on how the
-                # requested frame_interval compares to the video's GOP.
+                # av_auto: choose between true-interval parallel decode and the
+                # seek backend based on how frame_interval compares to the GOP.
                 #
-                # Seeking only pays off when the interval is large enough to
-                # skip whole GOPs; when it is smaller than the GOP, the seek
-                # backend re-decodes the GOP prefix for every target frame
-                # (e.g. a 2 s interval on an 8 s-GOP video re-decodes the same
-                # packets ~4x).  Sequential decode touches each frame once, so
-                # it wins whenever frame_interval <= GOP.
+                # When frame_interval < GOP, seeking would snap several adjacent
+                # targets onto the *same* keyframe (duplicate frames), so we must
+                # actually decode each GOP to produce a distinct frame per
+                # target — done in parallel across CPU cores for speed.
+                #
+                # When frame_interval >= GOP, each target lands on its own
+                # keyframe, so the cheap seek backend yields distinct frames
+                # without full decode (ideal for sparse sampling of long files).
                 if backend_used == "av_auto":
                     gop_seconds = probe_keyframe_interval_seconds(input_data)
                     if gop_seconds is not None and gop_seconds > 0:
-                        use_sequential = frame_interval <= gop_seconds
+                        use_parallel = frame_interval < gop_seconds
                     else:
-                        # GOP unknown: sequential is safe for typical sampling
-                        # rates; only switch to seeking for sparse sampling.
-                        use_sequential = frame_interval <= 4.0
-                    if use_sequential:
-                        preprocess_callable = preprocess_video_av_sequential
-                        backend_used = "av_sequential"
+                        # GOP unknown: assume dense sampling needs true decode.
+                        use_parallel = frame_interval < 4.0
+                    if use_parallel:
+                        # Parallel PyAV decode in worker *processes*: true
+                        # distinct frames at the requested interval, decoded with
+                        # separate GILs so the decoders overlap the async
+                        # inference pipeline instead of contending with it.
+                        preprocess_callable = functools.partial(
+                            preprocess_video_mp_pyav,
+                            decode_workers=self._decode_workers,
+                        )
+                        backend_used = "mp_pyav"
                     else:
                         preprocess_callable = preprocess_video_av_seek
                         backend_used = "av_seek"
@@ -324,7 +341,7 @@ class VideoPreprocessorModel(Model):
                             child = await ItemFuture.create(item, payload, item.item_future.handler)
                             if frame_semaphore is not None:
                                 child.future.add_done_callback(lambda _, s=frame_semaphore: s.release())
-                            children.append(child)
+                            children.append((frame_index, child))
 
                         if hit_done:
                             if _producer_error:
@@ -365,7 +382,13 @@ class VideoPreprocessorModel(Model):
                     self.logger.error(error_msg)
                     raise RuntimeError(error_msg)
 
-                await itemFuture.set_data(item.output_names[0], children)
+                # Frames may have been produced out of timestamp order (the
+                # parallel backend decodes independent chunks concurrently).
+                # Downstream timespan assembly assumes monotonic frame_index,
+                # so emit the children sorted by their frame time.
+                children.sort(key=lambda fc: (fc[0] is None, fc[0]))
+                ordered_children = [child for _, child in children]
+                await itemFuture.set_data(item.output_names[0], ordered_children)
             except FileNotFoundError as fnf_error:
                 self.logger.error(f"File not found error: {fnf_error}")
                 self.logger.debug("Stack trace:", exc_info=True)
