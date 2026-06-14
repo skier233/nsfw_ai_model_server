@@ -48,15 +48,6 @@ class ServerManager:
         self.logger = logging.getLogger("logger")
         self.port = config.get("port", 8000)
 
-        version_path = "./config/version.yaml"
-        if os.path.exists(version_path):
-            versionconfig = load_config(version_path, default_config={})
-        version = versionconfig.get("VERSION", "1.3.4")
-        
-        latest_version = get_latest_release_version(self.logger)
-        self.logger.debug(f"Current version: {version}, Latest version: {latest_version}")
-        if version != latest_version:
-            self.logger.warning("There is a new version available! Please update the server using install/update.sh or install/update.ps1")
         self.config = config
         self.pipeline_manager = PipelineManager()
         self.reload_lock = asyncio.Lock()
@@ -73,7 +64,22 @@ class ServerManager:
 
         self.default_audio_pipeline = config.get("default_audio_pipeline", "audio_pipeline_v4")
 
+    def _check_version(self):
+        version_path = "./config/version.yaml"
+        versionconfig = {}
+        if os.path.exists(version_path):
+            versionconfig = load_config(version_path, default_config={})
+        version = versionconfig.get("VERSION", "1.3.4")
+
+        latest_version = get_latest_release_version(self.logger)
+        self.logger.debug(f"Current version: {version}, Latest version: {latest_version}")
+        if version != latest_version:
+            self.logger.warning("There is a new version available! Please update the server using install/update.sh or install/update.ps1")
+
     async def startup(self):
+        # Run the GitHub version check once at server startup (main process only)
+        # rather than in __init__, which would re-run it in every spawned worker.
+        self._check_version()
         pipelines = self.config["active_pipelines"]
         if not pipelines:
             self.logger.error("No pipelines found in the configuration file.")

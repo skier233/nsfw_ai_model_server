@@ -27,6 +27,7 @@ from lib.server.text_encoding_service import text_encoding_service
 from lib.server.server_manager import server_manager, app, outstanding_requests_middleware
 from lib.server.v4_service import (
     VALID_LOAD_POLICIES,
+    expand_requested_models_with_dependencies,
     filter_pipeline_models,
     get_capability_catalog,
     get_loaded_models,
@@ -632,6 +633,9 @@ async def process_images_v4(request: ImageRequestV4):
             load_policy=request.load_policy,
         )
         pipeline_name = request.pipeline_name or server_manager.default_image_pipeline
+        requested_model_names = expand_requested_models_with_dependencies(
+            server_manager, pipeline_name, requested_model_names
+        )
         timeout = _get_request_timeout()
         futures = [
             await server_manager.get_request_future(
@@ -677,6 +681,9 @@ async def process_video_v4(request: VideoRequestV4):
             load_policy=request.load_policy,
         )
         pipeline_name = request.pipeline_name or server_manager.default_video_pipeline
+        requested_model_names = expand_requested_models_with_dependencies(
+            server_manager, pipeline_name, requested_model_names
+        )
         timeout = _get_request_timeout()
         future = await server_manager.get_request_future(
             [
@@ -693,6 +700,37 @@ async def process_video_v4(request: VideoRequestV4):
         )
         result = await _await_with_timeout(future, timeout)
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
+        # === TEMP FACE_DEBUG: explain why each ai model ran or was skipped ===
+        try:
+            _dbg = logging.getLogger("logger")
+            _skip_cats = set(request.categories_to_skip or [])
+            _requested = {str(n).strip() for n in (requested_model_names or []) if str(n).strip()}
+            _dbg.info(f"FACE_DEBUG path={request.path}")
+            _dbg.info(f"FACE_DEBUG categories_to_skip={sorted(_skip_cats)}")
+            _dbg.info(f"FACE_DEBUG requested_model_names={sorted(_requested)}")
+            for _i, _w in enumerate(request.want or []):
+                _dbg.info(
+                    f"FACE_DEBUG want[{_i}] capability={_w.capability} capabilities={_w.capabilities} "
+                    f"scope={_w.scope} from_detection={_w.from_detection} models={_w.models}"
+                )
+            for _mi in pipeline.get_ai_models_info():
+                _cats = list(_mi.categories or [])
+                _names = {n for n in {str(_mi.config_name or "").strip(), str(_mi.name or "").strip()} if n}
+                _cat_skip = bool(_cats) and all(_c in _skip_cats for _c in _cats)
+                _name_skip = bool(_requested) and _names.isdisjoint(_requested)
+                if _cat_skip:
+                    _why = "SKIPPED (all categories in categories_to_skip)"
+                elif _name_skip:
+                    _why = "SKIPPED (config_name/model_file_name not in requested_model_names)"
+                else:
+                    _why = "RUNS"
+                _dbg.info(
+                    f"FACE_DEBUG model config_name={_mi.config_name} file_name={_mi.name} "
+                    f"categories={_cats} -> {_why}"
+                )
+        except Exception as _dbg_exc:
+            logging.getLogger("logger").warning(f"FACE_DEBUG failed: {_dbg_exc}")
+        # === END TEMP FACE_DEBUG ===
         result["requested_model_names"] = requested_model_names
         result["models"] = filter_pipeline_models(pipeline, requested_model_names)
         result["reloaded"] = reloaded
