@@ -202,6 +202,52 @@ def resolve_want_model_names(server_manager, want, default_scope):
     return _dedupe(requested_model_names)
 
 
+def expand_requested_models_with_dependencies(server_manager, pipeline_name, requested_model_names):
+    """Ensure a requested region/embedding model also runs the detector that feeds it.
+
+    Region-scoped models (e.g. a face embedder) consume a detector's per-frame
+    output within the same analysis pass — the server is stateless and does not
+    reuse previously stored detections as input. If a request names only the
+    region model, the per-model skip gate (async_processing.batch_data_append_with_skips)
+    skips the upstream detector, so the region model runs with no detections to
+    process and produces nothing.
+
+    Expand the requested set to include the upstream detector for every requested
+    region model, using the pipeline's actual loaded-model wiring (config_name
+    based, via model_capabilities). This works regardless of whether the caller
+    knew the loaded detector's model name.
+    """
+    if not requested_model_names:
+        return requested_model_names
+
+    try:
+        dynamic_ai_manager = server_manager.pipeline_manager.dynamic_ai_manager
+        region_rules = dynamic_ai_manager.model_capabilities.get_region_model_rules(
+            pipeline_name, available_models=dynamic_ai_manager.models
+        ) or []
+    except Exception:
+        return requested_model_names
+
+    if not region_rules:
+        return requested_model_names
+
+    requested_set = set(requested_model_names)
+    additions = []
+    for rule in region_rules:
+        detector_name = rule.get("key")
+        region_models = rule.get("models") or []
+        if not detector_name or detector_name in requested_set:
+            continue
+        if any(region_model in requested_set for region_model in region_models):
+            additions.append(detector_name)
+            requested_set.add(detector_name)
+
+    if not additions:
+        return requested_model_names
+
+    return _dedupe(list(requested_model_names) + additions)
+
+
 def _get_available_models_by_name():
     return {model.get("yaml_file_name"): model for model in load_available_ai_models()}
 
