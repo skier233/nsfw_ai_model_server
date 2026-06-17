@@ -1,6 +1,6 @@
 -r requirements-base.txt
 # Windows/Linux NVIDIA GPU requirements
---extra-index-url https://download.pytorch.org/whl/cu132
+--extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.12.0
 torchvision==0.27.0
 torchaudio==2.11.0
