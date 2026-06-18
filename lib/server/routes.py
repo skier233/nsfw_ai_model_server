@@ -500,7 +500,7 @@ async def get_v4_capabilities():
         logger.debug("Stack trace:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
+@app.get("/")
 @app.get("/v4/health")
 async def get_v4_health():
     try:
