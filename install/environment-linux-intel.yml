@@ -2,8 +2,11 @@ name: ai_model_server
 channels:
   - defaults
 dependencies:
-  - python=3.11
+  - python=3.12
   - pip
   - pip:
-    - ../dist/ai_processing-0.0.0-cp311-cp311-linux_x86_64.whl  # [lin]
-    - -r requirements-intel.txt
+    - torch==2.12.0
+    - torchvision==0.27.0
+    - torchaudio==2.11.0
+    - -r requirements-base.txt
+    - ../dist/ai_processing-0.0.0-cp312-cp312-linux_x86_64.whl  # [lin]

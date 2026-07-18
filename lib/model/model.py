@@ -25,3 +25,6 @@ class Model:
 
     async def load(self):
         return
+
+    async def unload(self):
+        return

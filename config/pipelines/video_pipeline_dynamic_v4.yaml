@@ -1,0 +1,33 @@
+inputs:
+  - video_path
+  - return_timestamps
+  - time_interval
+  - threshold
+  - return_confidence
+  - vr_video
+  - skipped_categories
+  - requested_model_names
+output: results
+short_name: dynamic_video_v4
+version: 4.0
+
+models:
+  - name: dynamic_video_ai
+    inputs:
+      - video_path
+      - return_timestamps
+      - time_interval
+      - threshold
+      - return_confidence
+      - vr_video
+      - skipped_categories
+      - requested_model_names
+    outputs:
+      - childrenResults
+  - name: video_result_postprocessor_v4
+    inputs:
+      - childrenResults
+      - video_path
+      - time_interval
+    outputs:
+      - results

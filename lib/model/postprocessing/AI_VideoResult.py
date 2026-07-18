@@ -167,6 +167,9 @@ class AIVideoResultV3(BaseModel):
     frame_interval: float
     # category -> tag -> list of timeframes
     timespans: Dict[str, Dict[str, List[TagTimeFrame]]]
+    # Per-frame structured data (detections, regions, embeddings, etc.)
+    # Only frames with non-tag data are included.
+    frames: Optional[List[dict]] = None
 
     def to_json(self):
         return self.model_dump_json(exclude_none=True)
@@ -174,4 +177,5 @@ class AIVideoResultV3(BaseModel):
     @classmethod
     def from_server_result(cls, server_result, max_merge_seconds=2):
         timespans = AIVideoResult._mutate_server_result_tags(frames = server_result['frames'], frame_interval=server_result['frame_interval'], max_merge_seconds=max_merge_seconds)
-        return cls(schema_version=3, duration=server_result['video_duration'], models=server_result['models'], timespans=timespans, frame_interval=server_result['frame_interval'])
+        per_frame_data = server_result.get('per_frame_data') or None
+        return cls(schema_version=3, duration=server_result['video_duration'], models=server_result['models'], timespans=timespans, frame_interval=server_result['frame_interval'], frames=per_frame_data)

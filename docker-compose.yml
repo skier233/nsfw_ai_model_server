@@ -3,25 +3,37 @@ services:
     image: ai_model_server
     container_name: nsfw-ai-server
     restart: unless-stopped
-    
-  # GPU support
-  # For Intel GPUs, remove this deploy/resources block and the NVIDIA_* environment variables below.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-    
+
+  # ── NVIDIA CUDA ──
+  # Build with: docker build -t ai_model_server .
+  # Uncomment the deploy block and environment variables below for NVIDIA GPUs.
+  #
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: all
+    #          capabilities: [gpu]
+    #
+    #environment:
+    #  - NVIDIA_VISIBLE_DEVICES=all
+    #  - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+  # ── Intel XPU ──
+  # Build with: docker build -f Dockerfile-intel -t ai_model_server .
+  # Uncomment the devices and group_add below for Intel GPUs.
+  # Remove or comment out the NVIDIA block above.
+  #
+    #group_add:
+    #  - "44"   # video group (for /dev/dri access)
+    #devices:
+    #  - /dev/dri:/dev/dri
+
     ports:
       - "8000:8000"
       - "7483:7483"
-    
+
     volumes:
       # Named volume for media (models, data, etc.)
       - nsfw-ai-data:/media
