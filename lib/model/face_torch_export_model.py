@@ -102,8 +102,8 @@ class FaceTorchExportModel(AIModel):
         model_path = Path("./models") / f"{self.model_file_name}.pt2"
         if not model_path.exists():
             raise FileNotFoundError(f"Face torch.export model not found: {model_path}")
-        exported_program = torch.export.load(str(model_path))
-        self.model = exported_program.module().to(self.device)
+        from lib.utils.torch_export_loader import load_exported_module
+        self.model = load_exported_module(str(model_path), self.device)
         self.logger.info(
             f"Loaded face torch.export model: {model_path} (role={self.face_model_role}, device={self.device})"
         )

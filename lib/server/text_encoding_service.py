@@ -95,10 +95,16 @@ class _SemanticTextEncoder:
                     f"Install it, or export a portable .pt2 with: python scripts/export_semtext.py"
                 ) from exc
 
-        from torch.export import load as export_load
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*buffer is not writable.*", category=UserWarning)
-            self._model = export_load(str(model_path)).module().to(self._device)
+            if model_path.suffix == ".ep":
+                # TensorRT programs are compiled for a specific CUDA target and
+                # must not be retargeted to another device.
+                from torch.export import load as export_load
+                self._model = export_load(str(model_path)).module().to(self._device)
+            else:
+                from lib.utils.torch_export_loader import load_exported_module
+                self._model = load_exported_module(str(model_path), self._device)
 
     def encode(self, text: str) -> dict:
         normalized_text = (text or "").strip()

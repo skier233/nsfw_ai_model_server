@@ -136,8 +136,12 @@ class PipelineManager:
         pipeline = self.pipelines[pipeline_name]
         futureData = {}
         if len(data) != len(pipeline.inputs):
-            self.logger.error(f"Error: Data length does not match pipeline inputs length for pipeline {pipeline_name}!")
-            raise ValueError(f"Error: Data length does not match pipeline inputs length for pipeline {pipeline_name}!")
+            message = (
+                f"Error: Data length does not match pipeline inputs length for pipeline {pipeline_name}! "
+                f"Expected {len(pipeline.inputs)} ({', '.join(pipeline.inputs)}), got {len(data)}."
+            )
+            self.logger.error(message)
+            raise ValueError(message)
         for inputName, inputData in zip(pipeline.inputs, data):
             futureData[inputName] = inputData
         futureData["pipeline"] = pipeline

@@ -75,10 +75,10 @@ class PythonModel:
             return
         if self._is_exported:
             import warnings
-            from torch.export import load as export_load
+            from lib.utils.torch_export_loader import load_exported_module
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*buffer is not writable.*", category=UserWarning)
-                self.model = export_load(self.model_path).module().to(self.device)
+                self.model = load_exported_module(self.model_path, self.device)
         else:
             self.model = torch.jit.load(self.model_path, map_location=self.device).to(self.device)
         self.model_loaded = True

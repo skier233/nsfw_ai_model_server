@@ -40,6 +40,12 @@ import torch
 import time
 from lib.model.postprocessing.category_settings import category_config
 
+# The /v3/ endpoints serve a frozen response contract to existing clients
+# (Stash-AIServer et al). They must not follow default_*_pipeline, which now
+# points at the v4 pipelines and emits an incompatible payload shape.
+V3_IMAGE_PIPELINE = "image_pipeline_dynamic_v3"
+V3_VIDEO_PIPELINE = "video_pipeline_dynamic_v3"
+
 
 def _sanitize_for_log(obj, _depth=0):
     """Return a lightweight copy of *obj* suitable for debug logging.
@@ -224,9 +230,12 @@ async def process_video_v3(request: VideoRequestV3):
     try:
         logger.info(f"Processing video in v3 at path: {request.path}")
 
-        pipeline_name = server_manager.default_video_pipeline
-        
-        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip, None]
+        # Pinned to the v3 pipeline: the v3 response contract (timespans, schema_version)
+        # is produced by video_result_postprocessor_v3. Following default_video_pipeline
+        # would serve v4-shaped payloads to v3 clients.
+        pipeline_name = V3_VIDEO_PIPELINE
+
+        data = [request.path, True, request.frame_interval, request.threshold, False, request.vr_video, request.categories_to_skip]
 
         result = None
         try:
@@ -250,12 +259,13 @@ async def process_images_v3(request: ImageRequestV3):
     try:
         image_paths = request.paths
         logger.info(f"Processing {len(image_paths)} images")
-        pipeline_name = server_manager.default_image_pipeline
+        # Pinned to the v3 pipeline — see process_video_v3 for rationale.
+        pipeline_name = V3_IMAGE_PIPELINE
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
         timeout = _get_request_timeout()
         futures = [
             await server_manager.get_request_future(
-                [path, request.threshold, request.return_confidence, None, None], pipeline_name,
+                [path, request.threshold, request.return_confidence, None], pipeline_name,
             )
             for path in image_paths
         ]
@@ -285,6 +295,14 @@ async def process_images_v3(request: ImageRequestV3):
                     preprocess_backends.add(backend)
                 aggregate_metrics["image_count"] += 1
                 inner_result = result.get("result")
+                if inner_result is None:
+                    # The v3 postprocessor always nests tags under "result". A miss here
+                    # means a non-v3 payload reached this endpoint, and clients will
+                    # silently parse zero tags — make it loud rather than passing it on.
+                    logger.error(
+                        f"Pipeline '{pipeline_name}' returned no 'result' key for image {i}; "
+                        f"got keys {sorted(result.keys())}. Expected a v3-shaped payload."
+                    )
                 results[i] = inner_result if inner_result is not None else result
             else:
                 results[i] = result
@@ -408,7 +426,9 @@ async def process_video_face_recognition(request: VideoRequestV3):
 @app.get("/v3/current_ai_models/")
 async def get_current_video_ai_models():
     try:
-        pipeline_name = server_manager.default_video_pipeline
+        # Must match the pipeline /v3/process_video/ actually runs — v3 clients use
+        # this list to build their category classifier and to decide on reprocessing.
+        pipeline_name = V3_VIDEO_PIPELINE
         pipeline = server_manager.pipeline_manager.get_pipeline(pipeline_name)
         ai_models = pipeline.get_ai_models_info()
         return ai_models
