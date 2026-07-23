@@ -1,10 +1,10 @@
-# NSFW AI Tagging: Enhance Your Local Content Organization
+# AI Tagging: Enhance Your Local Content Organization
 
 This project is dedicated to creating and running AI models that can automatically select appropriate tags for images and videos (including at specific timestamps). Having this tag data for images and videos can provide invaluable information to help manage content and find content without spending manual time hunting for the right videos or images.
 
-## Key Benefits of NSFW Tagging AI
+## Key Benefits of AI Tagging
 
-The AI models available here are state-of-the-art, boasting far higher accuracy than any other NSFW AI models found on the internet. These models provide data that can be useful in many ways:
+The AI models available here are state-of-the-art, boasting far higher accuracy than any other similar AI models found on the internet. These models provide data that can be useful in many ways:
 
 * **Precision Time-Based Tagging**
   - The AI delivers highly accurate time-based tags, making it easy for you to search and find specific content within a video without having to watch the entire video to locate the interesting parts.
@@ -49,7 +49,7 @@ This project includes both a free open source AI model as well as several paid P
 
 ## Get Started
 
-To see the benefits of NSFW AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
+To see the benefits of AI Tagging for yourself, feel free to join as a Patron Member or try the free AI model:
 
 [Quickstart Guide](https://github.com/skier233/nsfw_ai_model_server/wiki/NSFW-AI-Tagging-Quickstart-Guide)
 
