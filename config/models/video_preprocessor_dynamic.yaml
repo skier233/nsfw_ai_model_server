@@ -5,6 +5,6 @@ instance_count: 1
 frame_interval: 2
 use_half_precision: false
 max_pending_frames: 19200             # Max preprocessed frames held in memory before pausing to let GPU catch up. 0 = unlimited.
-preprocess_backend: av_auto  # av_auto (default: seek when interval>=1s, threaded otherwise), av_seek, av, deffcode_auto, deffcode, deffcode_gpu
+preprocess_backend: av_auto  # av_auto (default: seek when interval>=1s, threaded otherwise), av_seek, av, vaapi_auto (Intel GPU decode when dense, PyAV seek when sparse), vaapi, deffcode_auto, deffcode, deffcode_gpu
 gpu_min_long_edge: 36000            # deffcode_auto: use GPU when video long edge >= this (0 = always GPU)
 decode_workers: 0                   # ffmpeg_parallel: parallel ffmpeg decode processes for true-interval sampling (0 = auto: min(8, cpu_count))

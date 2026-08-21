@@ -16,6 +16,8 @@ from lib.model.preprocessing_python.image_preprocessing import (
     preprocess_video_av,
     preprocess_video_av_seek,
     preprocess_video_mp_pyav,
+    preprocess_video_vaapi,
+    vaapi_decode_available,
     probe_keyframe_interval_seconds,
 )
 from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec, apply_spec_batch
@@ -108,7 +110,25 @@ class VideoPreprocessorModel(Model):
 
         requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
 
-        if requested_backend == "av":
+        if requested_backend == "vaapi":
+            # Force GPU (VAAPI) decode for every video, regardless of interval.
+            self._preprocess_backend = "vaapi"
+            self._preprocess_callable = preprocess_video_vaapi
+            self.logger.info("Video preprocessor using VAAPI hardware decode backend")
+        elif requested_backend == "vaapi_auto":
+            # GPU decode for dense sampling (where software decode pegs the CPU),
+            # cheap PyAV seek for sparse sampling (interval >= GOP).  Resolved
+            # per-request in worker_function; av_seek is the safe default here.
+            self._preprocess_backend = "vaapi_auto"
+            self._preprocess_callable = preprocess_video_av_seek  # overridden per-request
+            if vaapi_decode_available():
+                self.logger.info("Video preprocessor using VAAPI auto backend (GPU decode when dense, PyAV seek when sparse)")
+            else:
+                # No usable VAAPI — behave exactly like av_auto so nothing breaks
+                # on non-Intel hosts running the same config.
+                self._preprocess_backend = "av_auto"
+                self.logger.warning("VAAPI auto requested but no VAAPI hwaccel/render node available; using PyAV auto backend")
+        elif requested_backend == "av":
             self._preprocess_backend = "av"
             self._preprocess_callable = preprocess_video_av
             self.logger.info("Video preprocessor using PyAV threaded backend")
@@ -176,7 +196,7 @@ class VideoPreprocessorModel(Model):
                 # When frame_interval >= GOP, each target lands on its own
                 # keyframe, so the cheap seek backend yields distinct frames
                 # without full decode (ideal for sparse sampling of long files).
-                if backend_used == "av_auto":
+                if backend_used in ("av_auto", "vaapi_auto"):
                     gop_seconds = probe_keyframe_interval_seconds(input_data)
                     if gop_seconds is not None and gop_seconds > 0:
                         use_parallel = frame_interval < gop_seconds
@@ -184,20 +204,37 @@ class VideoPreprocessorModel(Model):
                         # GOP unknown: assume dense sampling needs true decode.
                         use_parallel = frame_interval < 4.0
                     if use_parallel:
-                        # Parallel PyAV decode in worker *processes*: true
-                        # distinct frames at the requested interval, decoded with
-                        # separate GILs so the decoders overlap the async
-                        # inference pipeline instead of contending with it.
-                        preprocess_callable = functools.partial(
-                            preprocess_video_mp_pyav,
-                            decode_workers=self._decode_workers,
-                        )
-                        backend_used = "mp_pyav"
+                        # Dense sampling → full decode.  vaapi_auto offloads that
+                        # to the GPU's VAAPI decoder (≈7x less CPU than software
+                        # decode, which otherwise pegs the cores); av_auto uses
+                        # parallel PyAV worker processes on the CPU.
+                        if backend_used == "vaapi_auto":
+                            # Dense sampling, so a per-video VAAPI failure must
+                            # fall back to the parallel decoder, not the seek
+                            # path — the latter would snap several targets onto
+                            # the same keyframe and quietly return duplicates.
+                            preprocess_callable = functools.partial(
+                                preprocess_video_vaapi,
+                                fallback_callable=functools.partial(
+                                    preprocess_video_mp_pyav,
+                                    decode_workers=self._decode_workers,
+                                ),
+                            )
+                            backend_used = "vaapi"
+                        else:
+                            preprocess_callable = functools.partial(
+                                preprocess_video_mp_pyav,
+                                decode_workers=self._decode_workers,
+                            )
+                            backend_used = "mp_pyav"
                     else:
+                        # Sparse sampling → cheap keyframe seek (few frames, low
+                        # CPU already) for both auto modes.
                         preprocess_callable = preprocess_video_av_seek
                         backend_used = "av_seek"
                     self.logger.info(
-                        "av_auto: frame_interval=%.3fs gop=%s → %s backend",
+                        "%s: frame_interval=%.3fs gop=%s → %s backend",
+                        self._preprocess_backend,
                         frame_interval,
                         f"{gop_seconds:.3f}s" if gop_seconds else "unknown",
                         backend_used,

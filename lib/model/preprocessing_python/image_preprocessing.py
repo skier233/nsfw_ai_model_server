@@ -4,6 +4,8 @@ import logging
 import os
 import queue
 import re
+import shutil
+import subprocess
 import threading
 import zipfile
 from contextlib import suppress
@@ -1219,3 +1221,378 @@ def preprocess_video_mp_pyav(
     ):
         result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
         yield (out_idx, result)
+
+
+# ---------------------------------------------------------------------------
+# VAAPI hardware decode
+# ---------------------------------------------------------------------------
+#
+# Software PyAV/DeFFcode decode fans out across CPU cores (measured ~22 CPU-
+# seconds to sample a 4-minute 720p clip @2fps), which is what saturates the
+# cores and starves inference.  Decoding on the GPU's fixed-function VAAPI
+# decoder does the same work in ~3 CPU-seconds (≈7x less CPU) and — when we
+# downscale on the GPU via scale_vaapi — hands back small frames, shrinking the
+# per-frame RAM footprint too.
+#
+# Nothing here is vendor-specific: VAAPI is the Linux video-acceleration API,
+# and this drives it through a plain DRM render node.  Verified on Intel (Arc
+# A380) and on AMD via Mesa's radeonsi — both RDNA2 discrete and a Vega iGPU —
+# where decoding 60s of 1080p h264 costs 1.9-2.3 CPU-seconds against 15.6 for
+# software.  Intel iGPUs expose the same interface.  Both vendors put video
+# decode on a fixed-function block (Intel's media engine, AMD's VCN) separate
+# from the shader/Xe cores inference runs on, which is why the CPU saving
+# doesn't come out of GPU compute.
+#
+# QSV is intentionally NOT used: on this stack it fails device-init ("No device
+# available for decoder"), whereas VAAPI is the lower, working layer.
+
+_VAAPI_RENDER_NODE = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+_VAAPI_AVAILABLE: Optional[bool] = None
+_FFMPEG_PASSTHROUGH_FLAGS: Optional[list] = None
+
+
+def _ffprobe_video_dims(video_path):
+    """(width, height) of the first video stream, or (0, 0) if unknown."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
+             str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        w, h = out.stdout.strip().split("x")[:2]
+        return int(w), int(h)
+    except Exception:
+        return 0, 0
+
+
+def _ffprobe_avg_frame_rate(video_path):
+    """Average frame rate of the first video stream, or 0.0 if unknown."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0",
+             str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        num, _, den = out.stdout.strip().partition("/")
+        rate = float(num) / float(den or 1)
+        return rate if rate > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _ffmpeg_frame_passthrough_flags():
+    """Flags that stop ffmpeg from CFR-padding an irregular frame stream.
+
+    The `select` sampler below emits frames at irregular intervals; without
+    this ffmpeg duplicates them up to the stream's frame rate (measured: 613
+    frames written for 41 selected).  ``-fps_mode passthrough`` is the modern
+    spelling, added in ffmpeg 5.1; ``-vsync 0`` is the old one, removed in
+    ffmpeg 9.  Neither works on both, so pick by version.  Cached.
+    """
+    global _FFMPEG_PASSTHROUGH_FLAGS
+    if _FFMPEG_PASSTHROUGH_FLAGS is not None:
+        return _FFMPEG_PASSTHROUGH_FLAGS
+    major = 0
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        m = re.search(r"ffmpeg version n?(\d+)", out.stdout)
+        if m:
+            major = int(m.group(1))
+    except Exception:
+        major = 0
+    # Unknown version → assume modern; a wrong guess makes ffmpeg exit
+    # immediately with "Unrecognized option", which the caller turns into a
+    # fallback to the PyAV path rather than bad output.
+    _FFMPEG_PASSTHROUGH_FLAGS = (
+        ["-vsync", "0"] if 0 < major < 5 else ["-fps_mode", "passthrough"]
+    )
+    return _FFMPEG_PASSTHROUGH_FLAGS
+
+
+def _timestamp_select_expr(frame_interval, src_fps):
+    """ffmpeg ``select`` expression sampling the same frames as the PyAV paths.
+
+    ffmpeg's ``fps`` filter is a frame-rate *converter*: it maps input frames
+    onto output slots and (with the default ``round=near``) picks the frame
+    nearest each slot's MIDPOINT, then relabels it with the slot's timestamp.
+    At ``fps=2`` on 29.97fps input that lands ~0.23s — 7 frames — later than
+    the target time it claims, and it emits one slot fewer than the PyAV
+    samplers.  Verified against source-frame checksums on ffmpeg 4.4, 6.1
+    and 9.0.
+
+    ``mp_decode._decode_chunk_worker`` — the sampler this backend replaces in
+    the dense regime — instead emits the first frame whose timestamp reaches
+    ``target``, allowing half a source frame of tolerance, and advances the
+    target only when a frame is emitted.  This expression is that rule:
+    ``ld(1)`` holds the next target (ffmpeg initialises it to 0), and the
+    store only runs on frames that are selected because ffmpeg's ``if()``
+    evaluates its branch lazily.  ``st()`` returns the value it stored, which
+    is always > 0, so a selected frame reads as true.
+
+    Note this compares against ffmpeg's ``t`` (start_time-normalised) where
+    PyAV compares raw ``pts * time_base``; the two differ on containers whose
+    first PTS isn't zero.
+    """
+    tol = (0.5 / src_fps) if src_fps and src_fps > 0 else 0.02
+    return (
+        "select='if(gte(t+{tol:.6f},ld(1)),st(1,ld(1)+{interval:.6f}),0)'".format(
+            tol=tol, interval=frame_interval,
+        )
+    )
+
+
+def vaapi_decode_available(render_node=None):
+    """True if a VAAPI device on *render_node* can actually be initialised.
+
+    This has to open the device, not just look for the hwaccel: ffmpeg is
+    routinely built with vaapi support in images that ship no VA *driver*, and
+    the render node exists whenever /dev/dri is passed in.  In that state a
+    name-and-path check says yes while every decode dies in
+    ``va_openDriver() returns -1``, so the caller picks the GPU path and then
+    falls back per video — which silently costs true per-interval sampling.
+    Initialising a device here is ~0.1s once, and is cached.
+
+    Success still doesn't guarantee every codec decodes (10-bit/4:4:4 and
+    exotic codecs may fail on a device that opens fine), so callers keep their
+    per-video fallback.
+    """
+    global _VAAPI_AVAILABLE
+    if _VAAPI_AVAILABLE is not None:
+        return _VAAPI_AVAILABLE
+    node = render_node or _VAAPI_RENDER_NODE
+    ok = False
+    try:
+        if shutil.which("ffmpeg") and os.path.exists(node):
+            probe = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                 "-init_hw_device", f"vaapi=va:{node}",
+                 "-f", "lavfi", "-i", "nullsrc", "-frames:v", "1", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=30,
+            )
+            ok = probe.returncode == 0
+            if not ok:
+                logging.getLogger("logger").info(
+                    "VAAPI unavailable on %s: %s", node,
+                    (probe.stderr or "").strip().replace("\n", " ")[-200:],
+                )
+    except Exception:
+        ok = False
+    _VAAPI_AVAILABLE = ok
+    return ok
+
+
+def _even(value):
+    n = int(round(value))
+    return n - (n & 1)
+
+
+def _scaled_output_dims(src_w, src_h, max_long_edge):
+    """Target (w, h) preserving aspect, long edge capped to *max_long_edge*.
+
+    Both dims forced even (nv12 requirement).  Returns the source dims (evened)
+    when no cap applies.  (0, 0) if the source dims are unknown.
+    """
+    if src_w <= 0 or src_h <= 0:
+        return 0, 0
+    if max_long_edge and max(src_w, src_h) > max_long_edge:
+        if src_w >= src_h:
+            w, h = max_long_edge, max_long_edge * src_h / src_w
+        else:
+            w, h = max_long_edge * src_w / src_h, max_long_edge
+    else:
+        w, h = src_w, src_h
+    return max(2, _even(w)), max(2, _even(h))
+
+
+def preprocess_video_vaapi(
+    video_path,
+    frame_interval=0.5,
+    img_size=512,
+    use_half_precision=True,
+    device=None,
+    use_timestamps=False,
+    vr_video=False,
+    norm_config=1,
+    max_decode_long_edge=0,
+    render_node=None,
+    fallback_callable=None,
+    **_kwargs,
+):
+    """Hardware video decode via ffmpeg VAAPI (Intel, and AMD through Mesa).
+
+    Decodes (and optionally downscales) on the GPU, then downloads small RGB
+    frames to host RAM.  Yields ``(out_idx, tensor)`` with the SAME contract as
+    the other backends: ``out_idx`` is a timestamp when *use_timestamps* else a
+    sequential index, and ``tensor`` is the :func:`_prepare_frame` output.
+
+    Robustness: if VAAPI is unavailable, the video's dimensions can't be probed,
+    or ffmpeg produces no frames (unsupported codec / busy device), this
+    transparently falls back so one bad clip never aborts a run.  The fallback
+    is :func:`preprocess_video_av_seek` unless *fallback_callable* names another
+    sampler with the same signature — callers sampling densely should pass the
+    parallel decoder, because the seek path snaps several targets onto the same
+    keyframe and would return duplicates instead of distinct frames.
+    """
+    log = logging.getLogger("logger")
+    video_path = _validate_local_video_source(video_path)
+    node = render_node or _VAAPI_RENDER_NODE
+
+    def _fallback(reason):
+        # Default to the seek sampler, but let the caller supply one that suits
+        # the sampling density: at frame_interval < GOP the seek path snaps
+        # several targets onto the same keyframe, so falling back to it turns a
+        # decode failure into a silent loss of distinct frames rather than a
+        # visible one.
+        target = fallback_callable or preprocess_video_av_seek
+        log.warning(
+            "VAAPI decode falling back to software decode for '%s': %s",
+            video_path, reason,
+        )
+        yield from target(
+            video_path, frame_interval, img_size, use_half_precision, device,
+            use_timestamps, vr_video=vr_video, norm_config=norm_config,
+            max_decode_long_edge=max_decode_long_edge,
+        )
+
+    if not vaapi_decode_available(node):
+        yield from _fallback("vaapi hwaccel / render node unavailable")
+        return
+
+    if device:
+        device = torch.device(device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    mean, std = get_normalization_config(norm_config, device)
+    frame_transforms = get_frame_transforms(
+        use_half_precision, mean, std, vr_video=vr_video, img_size=img_size,
+        apply_resize=(isinstance(img_size, (int, float)) and int(img_size) > 0),
+        scale_values=(norm_config != -1),
+    )
+
+    src_w, src_h = _ffprobe_video_dims(video_path)
+    if src_w <= 0 or src_h <= 0:
+        yield from _fallback("could not probe video dimensions")
+        return
+
+    _mdle = int(max_decode_long_edge) if max_decode_long_edge else 0
+    out_w, out_h = _scaled_output_dims(src_w, src_h, _mdle)
+    frame_bytes = out_w * out_h * 3
+    interval = frame_interval if (frame_interval and frame_interval > 0) else 0.5
+
+    # Sample by timestamp, not with the `fps` filter — see
+    # _timestamp_select_expr for why `fps` picks the wrong frames.  `select`
+    # runs before hwdownload so rejected frames never leave the GPU.
+    vf = [_timestamp_select_expr(interval, _ffprobe_avg_frame_rate(video_path))]
+    if (out_w, out_h) != (src_w, src_h):
+        vf.append(f"scale_vaapi={out_w}:{out_h}")
+    vf += ["hwdownload", "format=nv12"]
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-hwaccel", "vaapi", "-hwaccel_device", node,
+        "-hwaccel_output_format", "vaapi",
+        "-i", str(video_path),
+        "-an",
+        "-vf", ",".join(vf),
+        *_ffmpeg_frame_passthrough_flags(),
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            bufsize=max(frame_bytes * 2, io.DEFAULT_BUFFER_SIZE),
+        )
+    except Exception as exc:
+        yield from _fallback(f"ffmpeg spawn failed: {exc}")
+        return
+
+    # Keep only the tail of stderr for diagnostics, and drain it so a chatty
+    # ffmpeg can't deadlock on a full stderr pipe.
+    _stderr_tail: list = []
+
+    def _drain_stderr():
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                _stderr_tail.append(line)
+                if len(_stderr_tail) > 20:
+                    _stderr_tail.pop(0)
+        except Exception:
+            pass
+
+    # Read fixed-size raw frames off the pipe (GIL-free C read) into a bounded
+    # queue; the consumer runs the torch transform, mirroring av_seek so decode
+    # overlaps inference and the backlog stays bounded.
+    _PREFETCH_DEPTH = 16
+    _SENTINEL = object()
+    prefetch_q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+    prefetch_error: list = []
+
+    def _reader():
+        try:
+            idx = 0
+            read = proc.stdout.read
+            while True:
+                buf = read(frame_bytes)
+                if not buf or len(buf) < frame_bytes:
+                    break
+                # bytearray → writable backing store (torch.from_numpy dislikes
+                # read-only buffers); frame is small so the copy is cheap.
+                frame_np = np.frombuffer(bytearray(buf), dtype=np.uint8).reshape(out_h, out_w, 3)
+                out_idx = (idx * interval) if use_timestamps else idx
+                prefetch_q.put((out_idx, frame_np))
+                idx += 1
+        except Exception as exc:  # noqa: BLE001 - surfaced to consumer
+            prefetch_error.append(exc)
+        finally:
+            prefetch_q.put(_SENTINEL)
+
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True, name="vaapi-stderr")
+    reader = threading.Thread(target=_reader, daemon=True, name="vaapi-reader")
+    err_thread.start()
+    reader.start()
+
+    produced = 0
+    try:
+        while True:
+            item = prefetch_q.get()
+            if item is _SENTINEL:
+                if prefetch_error:
+                    raise prefetch_error[0]
+                break
+            out_idx, frame_np = item
+            result = _prepare_frame(frame_np, device, vr_video, frame_transforms)
+            produced += 1
+            yield (out_idx, result)
+    finally:
+        # Terminate ffmpeg and join helpers on normal end, error, or generator
+        # close (GeneratorExit from a downstream cancel).
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+        while reader.is_alive():
+            try:
+                prefetch_q.get_nowait()
+            except queue.Empty:
+                break
+        reader.join(timeout=2.0)
+        err_thread.join(timeout=2.0)
+        with suppress(Exception):
+            proc.stdout.close()
+        with suppress(Exception):
+            proc.stderr.close()
+
+    # No frames + non-zero exit → VAAPI couldn't handle this clip (e.g. 10-bit
+    # HEVC on a decoder that lacks it).  Fall back so the clip still gets tagged.
+    if produced == 0 and proc.returncode not in (0, None):
+        tail = b"".join(_stderr_tail).decode("utf-8", "ignore").strip().replace("\n", " ")
+        yield from _fallback(f"ffmpeg exit {proc.returncode}: {tail[-200:]}")
