@@ -22,6 +22,9 @@ RUN wget -O- https://repositories.intel.com/gpu/intel-graphics.key \
         level-zero \
         libze-intel-gpu1 \
         intel-opencl-icd \
+        intel-media-va-driver-non-free \
+        libva-drm2 \
+        vainfo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.12 -m pip install torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
