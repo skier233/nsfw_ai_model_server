@@ -32,10 +32,13 @@ def compute_auto_pending_frames(per_frame_mb, ram_fraction, assumed_concurrency,
     """
     if per_frame_mb <= 0:
         return _fallback
-    try:
-        import psutil
-        total_mb = psutil.virtual_memory().total / (1024 ** 2)
-    except Exception:
+    # Use the memory actually available to this process: inside a memory-limited
+    # container psutil reports the *host's* RAM, so budgeting off it lets the
+    # in-flight backlog blow past the container's cgroup cap and OOM/livelock the
+    # host.  effective_total_memory_mb() clamps to the cgroup limit when set.
+    from lib.utils.memory_utils import effective_total_memory_mb
+    total_mb = effective_total_memory_mb()
+    if not total_mb or total_mb <= 0:
         return _fallback
     budget_mb = total_mb * ram_fraction
     cap = int(budget_mb / max(assumed_concurrency, 1) / per_frame_mb)
