@@ -33,6 +33,21 @@ RUN python3.12 -m pip install -r requirements-base.txt
 COPY dist/ai_processing-0.0.0-cp312-cp312-linux_x86_64.whl /tmp/
 RUN python3.12 -m pip install /tmp/ai_processing-0.0.0-cp312-cp312-linux_x86_64.whl
 
+# Runtime knobs for this image (both optional, both read at startup):
+#
+#   PREPROCESS_BACKEND  Decode backend, overriding config/models/video_preprocessor_dynamic.yaml.
+#                       Unset (default) = whatever the config says, which ships as
+#                       av_auto, i.e. CPU decode.  Set vaapi_auto to decode on the GPU when
+#                       sampling is dense and fall back to PyAV seek when it is sparse; vaapi
+#                       forces GPU decode always.  vaapi_auto degrades to av_auto by itself if
+#                       no usable VA device is present, so it is safe to leave set.
+#                       GPU decode needs --device /dev/dri, membership of the render group,
+#                       and a VA driver in the image (intel-media-va-driver-non-free);
+#                       `vainfo` reports whether one is loadable.
+#   VAAPI_DEVICE        Render node to decode on.  Default /dev/dri/renderD128.
+#
+#   docker run -e PREPROCESS_BACKEND=vaapi_auto --device /dev/dri --group-add <render gid> ...
+
 EXPOSE 8000
 WORKDIR /app
 CMD ["python3.12", "server.py"]

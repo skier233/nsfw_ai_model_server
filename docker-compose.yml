@@ -29,6 +29,13 @@ services:
     #  - "44"   # video group (for /dev/dri access)
     #devices:
     #  - /dev/dri:/dev/dri
+    #
+    # Decode video on the GPU instead of the CPU.  Optional and off by default;
+    # needs the two lines above.  vaapi_auto falls back to CPU decode on its own
+    # if the container has no usable VA device.
+    #environment:
+    #  - PREPROCESS_BACKEND=vaapi_auto
+    #  - VAAPI_DEVICE=/dev/dri/renderD128
 
     ports:
       - "8000:8000"

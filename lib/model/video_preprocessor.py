@@ -23,6 +23,16 @@ from lib.model.preprocessing_python.image_preprocessing import (
 from lib.pipeline.preprocess_spec import PreprocessSpec, apply_spec, apply_spec_batch
 
 
+# Values accepted by `preprocess_backend` in the video preprocessor config and
+# by the PREPROCESS_BACKEND environment override.  Only used to warn about a
+# value that would otherwise fall through to the default silently.
+_KNOWN_PREPROCESS_BACKENDS = frozenset({
+    "vaapi", "vaapi_auto",
+    "av", "av_seek", "av_auto",
+    "deffcode", "deffcode_gpu", "deffcode_auto",
+})
+
+
 def compute_auto_pending_frames(per_frame_mb, ram_fraction, assumed_concurrency,
                                 _min=32, _max=4096, _fallback=256):
     """RAM-safe per-video cap on in-flight preprocessed frames.
@@ -108,7 +118,23 @@ class VideoPreprocessorModel(Model):
         _pbs = configValues.get("preprocess_batch_size", 32)
         self._preprocess_batch_size = max(1, int(_pbs) if _pbs else 32)
 
-        requested_backend = str(configValues.get("preprocess_backend", "deffcode_auto")).lower()
+        # PREPROCESS_BACKEND lets a deployment pick the decode backend without
+        # editing the shipped config — the same env-over-config shape as
+        # DEFFCODE_HW_DECODER and VAAPI_DEVICE.  Unset (the default) leaves the
+        # config in charge, so hardware decode is opt-in per container:
+        #   docker run -e PREPROCESS_BACKEND=vaapi_auto --device /dev/dri ...
+        env_backend = os.environ.get("PREPROCESS_BACKEND")
+        requested_backend = str(
+            env_backend or configValues.get("preprocess_backend", "deffcode_auto")
+        ).lower()
+
+        # A typo'd env var is invisible in a way a bad config value isn't: it
+        # silently falls through to the default backend below.  Name it.
+        if env_backend and requested_backend not in _KNOWN_PREPROCESS_BACKENDS:
+            self.logger.warning(
+                "PREPROCESS_BACKEND=%r is not a known backend (%s); ignoring it and using the default backend",
+                env_backend, ", ".join(sorted(_KNOWN_PREPROCESS_BACKENDS)),
+            )
 
         if requested_backend == "vaapi":
             # Force GPU (VAAPI) decode for every video, regardless of interval.
