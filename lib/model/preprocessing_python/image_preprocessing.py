@@ -507,6 +507,32 @@ def _guess_deffcode_hw_decoder(codec_name: Optional[str]) -> Optional[str]:
             return value
     return _DEFFCODE_HW_DECODER_MAP.get(lowered)
 
+def _timestamp_select_expr(frame_interval, src_fps):
+    """ffmpeg ``select`` expression that samples on a timestamp grid.
+
+    Emits the first frame whose timestamp reaches each target
+    ``k * frame_interval``, allowing half a source frame of tolerance, and
+    advances the target only when a frame is emitted — the same rule
+    :func:`~lib.model.preprocessing_python.mp_decode._decode_chunk_worker`
+    uses, so every backend returns the same frame for a given timestamp.
+
+    ``ld(1)`` holds the next target (ffmpeg initialises expression variables to
+    0) and ``st()`` returns the value it stored, which is always > 0, so a
+    selected frame reads as true.  The store runs only on selected frames
+    because ffmpeg's ``if()`` evaluates its branch lazily.
+
+    Note this compares against ffmpeg's ``t``, which is start_time-normalised,
+    where PyAV compares raw ``pts * time_base``; the two differ on containers
+    whose first PTS isn't zero.
+    """
+    tol = (0.5 / src_fps) if src_fps and src_fps > 0 else 0.02
+    return (
+        "select='if(gte(t+{tol:.6f},ld(1)),st(1,ld(1)+{interval:.6f}),0)'".format(
+            tol=tol, interval=frame_interval,
+        )
+    )
+
+
 def preprocess_video_deffcode_auto(
     video_path,
     frame_interval=0.5,
@@ -698,8 +724,13 @@ def preprocess_video_deffcode(
         frame_step_frames = max(1, round(source_fps * frame_interval))
     
     vf_parts = []
-    if frame_step_frames > 1:
-        vf_parts.append(f"select='not(mod(n,{frame_step_frames}))'")
+    if frame_interval and frame_interval > 0:
+        # Select by timestamp, not by frame index.  `not(mod(n,step))` samples
+        # every step/source_fps seconds while the frames are labelled
+        # k*frame_interval below, so the label drifts linearly whenever
+        # source_fps*frame_interval isn't an integer — 23.976fps at 0.2s lands
+        # on 0.20854s (+4.3%), 25fps at 0.5s on 0.48s (-4%).
+        vf_parts.append(_timestamp_select_expr(frame_interval, source_fps))
 
     # Downscale at FFmpeg level when max_decode_long_edge is set.
     # This dramatically reduces per-frame data size before it reaches Python.
@@ -825,9 +856,11 @@ def preprocess_video_deffcode_gpu(
             frame_step_frames = max(1, round(1.0 / frame_interval))
 
     vf_filters = []
-    # Use frame-based select filter for consistency
-    if frame_step_frames > 1:
-        vf_filters.append(f"select=not(mod(n\\,{frame_step_frames}))")
+    # Select by timestamp rather than frame index — see the note in
+    # preprocess_video_deffcode; the index form drifts against the timestamps
+    # these frames are labelled with.
+    if frame_interval and frame_interval > 0:
+        vf_filters.append(_timestamp_select_expr(frame_interval, source_fps))
     
     # Add hwdownload and format conversion for NVDEC
     vf_filters.extend(
